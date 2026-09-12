@@ -1,0 +1,3 @@
+# Workflows run on Linux; keep LF in the tree so shell steps do not break.
+* text=auto eol=lf
+*.png binary

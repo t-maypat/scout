@@ -1,0 +1,55 @@
+name: digest
+
+# Interrupting, not observing. Once a day, when there is actually time to act on it.
+# 14:30 UTC is 20:00 IST.
+on:
+  schedule:
+    - cron: "30 14 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the digest instead of sending it"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scout-digest
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    # A hung job must not sit there consuming minutes.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen
+
+      - name: Build and send
+        env:
+          SCOUT_GITHUB_TOKEN: ${{ secrets.SCOUT_GITHUB_TOKEN }}
+          SCOUT_DISCORD_WEBHOOK_URL: ${{ secrets.SCOUT_DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            uv run scout digest
+          else
+            uv run scout digest --send
+          fi
+
+      - name: Record what was sent
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          if [ -z "$(git status --porcelain events)" ]; then exit 0; fi
+          git config user.name "scout"
+          git config user.email "scout@users.noreply.github.com"
+          git add events
+          git commit -m "digest sent: $(date -u +%Y-%m-%dT%H:%MZ)"
+          git pull --rebase --autostash
+          git push

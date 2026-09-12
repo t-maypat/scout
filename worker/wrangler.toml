@@ -1,0 +1,14 @@
+name = "scout-interactions"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# No routes, no KV, no D1. This worker holds no state: it verifies a signature and
+# forwards the intent to GitHub Actions, where the Python lives.
+
+[vars]
+GITHUB_REF = "main"
+
+# Set these with `wrangler secret put NAME` - never in this file:
+#   DISCORD_PUBLIC_KEY   Discord application -> General Information -> Public Key
+#   GITHUB_TOKEN         fine-grained PAT, Actions: read+write, on the scout repo ONLY
+#   GITHUB_REPO          "owner/scout"
