@@ -1,0 +1,57 @@
+name: poll
+
+# Observing, not interrupting. This runs often so the event log is accurate; the digest
+# workflow decides when any of it is worth a notification.
+#
+# GitHub's scheduled workflows are best-effort and routinely run late. That is fine here:
+# nothing downstream cares whether an observation was recorded at :00 or :23. It also
+# disables schedules after 60 days of repository inactivity - the log commit below is
+# what keeps this one alive.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Two overlapping runs would both try to commit the log. The poller itself is idempotent,
+# but the push is not, so serialise.
+concurrency:
+  group: scout-poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    # A hung job must not sit there consuming minutes.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen
+
+      - name: Poll the watchlist
+        env:
+          SCOUT_GITHUB_TOKEN: ${{ secrets.SCOUT_GITHUB_TOKEN }}
+        run: uv run scout poll
+
+      - name: Commit new observations
+        run: |
+          if [ -z "$(git status --porcelain events state)" ]; then
+            echo "nothing new"
+            exit 0
+          fi
+          git config user.name "scout"
+          git config user.email "scout@users.noreply.github.com"
+          git add events state
+          git commit -m "poll: $(date -u +%Y-%m-%dT%H:%MZ)"
+          # Another run may have pushed while this one was working. The log is
+          # append-only and events carry deterministic ids, so a rebase cannot conflict
+          # semantically - worst case a duplicate line, which derivation drops.
+          git pull --rebase --autostash
+          git push
