@@ -235,6 +235,8 @@ def _issue_metrics(
     contest_cutoff: datetime,
     requested: int,
     window_days: int,
+    now: datetime,
+    unanswered_after_hours: float,
 ) -> dict[str, Any]:
     reply_hours: list[float] = []
     unanswered = 0
@@ -258,11 +260,15 @@ def _issue_metrics(
                 maintainer_hours.append(stamp.hour + stamp.minute / 60)
 
         if node.get("authorAssociation") in OUTSIDER:
-            outsider_issues += 1
             first_reply = _first_comment_at(comments, MAINTAINER)
             if first_reply:
+                outsider_issues += 1
                 reply_hours.append(_hours_between(created, first_reply))
-            else:
+            elif _hours_between(created, now) >= unanswered_after_hours:
+                # Silence is only evidence once a reply was actually due. An issue opened
+                # forty minutes ago is not being ignored, and on a fast repository a
+                # fixed-size sample is mostly issues that young.
+                outsider_issues += 1
                 unanswered += 1
 
         labels = {
@@ -391,6 +397,7 @@ def build_health(
     free_hours: tuple[int, int],
     merged_requested: int = 0,
     issues_requested: int = 0,
+    unanswered_after_hours: float = 72.0,
     now: datetime | None = None,
 ) -> RepoHealth:
     """Pure: three recorded API responses in, one health record out.
@@ -416,6 +423,8 @@ def build_health(
         contest_cutoff,
         issues_requested,
         lookback_days,
+        now,
+        unanswered_after_hours,
     )
     tz = _timezone_metrics(issue.pop("_maintainer_hours"), free_hours)
 
@@ -454,14 +463,25 @@ def verdict(health: RepoHealth) -> tuple[str, list[str]]:
     if health.days_since_push > 120:
         return DEAD, [f"no push in {health.days_since_push} days"]
 
+    # A rate stays trustworthy in a short window; a count of a rare event does not.
+    # `outsider_merge_rate` over a hundred merges is solid even if they all landed in two
+    # days. `cold_merges == 0` over those same two days means nothing at all - on a fast
+    # repository everyone who merges this week is already a repeat CONTRIBUTOR, and the
+    # first-timers from three months ago are outside the sample. So the absence-based
+    # rules are gated on coverage and the rate-based one is not.
     fatal: list[str] = []
-    if health.merged_sample >= 20 and health.cold_merges == 0:
+    if (
+        health.merged_sample >= 20
+        and health.cold_merges == 0
+        and not health.merged_coverage.partial
+    ):
         fatal.append(f"{health.merged_sample} PRs merged, none from a first-time contributor")
     if health.merged_sample >= 20 and health.outsider_merge_rate < 0.05:
         fatal.append(f"only {health.outsider_merge_rate:.0%} of merges came from outside")
     if (
         health.outsider_issues >= 10
         and health.unanswered_outsider_issues / health.outsider_issues > 0.8
+        and not health.issue_coverage.partial
     ):
         fatal.append("maintainers answer fewer than 1 in 5 outsider issues")
     if fatal:
@@ -469,6 +489,19 @@ def verdict(health: RepoHealth) -> tuple[str, list[str]]:
 
     if health.merged_sample < 10:
         return THIN, [f"only {health.merged_sample} merges in the window - too few to judge"]
+
+    # The opposite shortfall: not too few merges, too many in too little time. The page
+    # size ran out before the window did, so the evidence that would convict is simply
+    # not in the sample. Refusing to judge is the honest answer, not a soft verdict.
+    if health.cold_merges == 0 and health.merged_coverage.partial:
+        span = health.merged_coverage.span_days or 0
+        return THIN, [
+            f"{health.merged_sample} merges in {span:.0f}d - too fast for a "
+            f"{health.merged_coverage.requested}-row sample to see first-timers",
+            f"but {health.outsider_merge_rate:.0%} of merges came from outside, "
+            "which a short window does not distort",
+            "re-probe with a larger --sample to judge it",
+        ]
 
     warn: list[str] = []
     if (reply := health.median_hours_to_maintainer_reply) is not None and reply > 336:

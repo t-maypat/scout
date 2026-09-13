@@ -20,6 +20,7 @@ from scout.events import EventLog
 from scout.github import GitHubClient, GitHubError, NotFound
 from scout.metrics import RepoHealth
 from scout.poll import poll_all
+from scout.probe import DEFAULT_MAX_PAGES
 from scout.probe import probe as run_probe
 from scout.safety import SafetyError, assert_enabled, assert_repo_cap
 
@@ -145,11 +146,17 @@ def _entry_from(health: RepoHealth, existing: watchlist.WatchedRepo | None, why:
 
 
 @app.command()
-def probe(repo: str, save: bool = typer.Option(False, "--save", help="Add to the watchlist")):
+def probe(
+    repo: str,
+    save: bool = typer.Option(False, "--save", help="Add to the watchlist"),
+    pages: int = typer.Option(
+        DEFAULT_MAX_PAGES, "--pages", help="Page budget. Raise it for very fast repos."
+    ),
+):
     """Score one repository on whether it will merge work from a stranger."""
     with _client() as client:
         try:
-            health = run_probe(client, repo)
+            health = run_probe(client, repo, max_pages=pages)
         except NotFound:
             console.print(f"[red]no such repository: {repo}[/]")
             raise typer.Exit(1) from None
@@ -170,11 +177,15 @@ def probe(repo: str, save: bool = typer.Option(False, "--save", help="Add to the
 
 
 @app.command()
-def add(repo: str, why: str = typer.Option("", "--why", help="Why this one, in a sentence")):
+def add(
+    repo: str,
+    why: str = typer.Option("", "--why", help="Why this one, in a sentence"),
+    pages: int = typer.Option(DEFAULT_MAX_PAGES, "--pages", help="Page budget"),
+):
     """Probe a repository and put it on the watchlist."""
     with _client() as client:
         try:
-            health = run_probe(client, repo)
+            health = run_probe(client, repo, max_pages=pages)
         except NotFound:
             console.print(f"[red]no such repository: {repo}[/]")
             raise typer.Exit(1) from None
