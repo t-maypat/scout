@@ -130,7 +130,44 @@ Wilson specifically, rather than the textbook normal approximation, because the 
 one breaks down exactly where this data lives — at proportions near zero, where it
 returns negative lower bounds and intervals far too narrow to be honest.
 
-### Problem 3: the underlying field may not mean what it says
+### Problem 3: the underlying field does not mean what it says
+
+This started as a suspicion and was settled by sampling BerriAI/litellm's public API.
+
+| Sample | `MEMBER` / `OWNER` / `COLLABORATOR` found |
+|---|---|
+| 30 issue and pull request authors | 0 |
+| 66 comments across 12 threads | 0 |
+| 100 most recent comments repo-wide | 0 |
+
+Not one, anywhere. Meanwhile `ishaan-jaff` and `yuneng-berri` both merged pull requests
+during the window, so both certainly have write access.
+
+The cause: **BerriAI has zero public organisation members.** `author_association` reports
+`MEMBER` only when somebody has made their membership public, so on that repository the
+field cannot name a maintainer at all. Scout had read that as "the maintainers ignore
+1152 of 1152 issues" and returned `TRAP` on a project that merges outsiders' pull
+requests in six hours.
+
+Worth noting for anyone sampling this themselves: of the 29 `CONTRIBUTOR` comments, 27
+were bots. Automation accrues contributor status like anybody else.
+
+**The fix: merging is a permission.** Nobody without write access can do it, and
+`PullRequest.mergedBy` is already in the query the probe makes, so the maintainer set
+costs no extra request. It is unioned with the association, which stays correct wherever
+it is readable.
+
+That set decides who counts as a maintainer for reply time, for the activity clock, and
+for keeping a maintainer's own stale pull request out of the work offered to you. The
+poll has the same blind spot and cannot close it alone - the issues endpoint never says
+who merged anything - so the probe records the set on the watchlist entry and derivation
+reads it.
+
+Re-probed afterwards, litellm went from `TRAP` to `VIABLE`: 70 maintainer comments found
+where there had been none, reply time resolved to a median of two days, the clock
+resolved to UTC-8, and two false opportunities disappeared.
+
+### The same field, for first-timers
 
 `authorAssociation` is documented as how the author **is** associated with the
 repository — present tense. If it is computed when you read it rather than frozen at
