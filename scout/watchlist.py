@@ -31,8 +31,6 @@ class WatchedRepo(BaseModel):
     # The toggle. False takes a repo out of the poll loop without losing what was learned
     # about it - useful while a project is in a noisy release week.
     poll: bool = True
-    # Earns an interrupt rather than waiting for the evening digest. Keep this rare.
-    hot: bool = False
     # Cold start. Empty until you have actually run them.
     setup: str = ""
     test: str = ""
