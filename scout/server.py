@@ -602,6 +602,12 @@ def create_app() -> FastAPI:
     return app
 
 
+# uvicorn's reloader needs an import string rather than an instance, so the app has to
+# exist at module scope. Construction only registers routes; nothing here touches the
+# network or the filesystem.
+app = create_app()
+
+
 def _dismissed(log: EventLog) -> set[str]:
     return notify.already_sent(log.read())
 

@@ -536,6 +536,9 @@ def replay(
 def serve(
     port: int = typer.Option(8765, "--port"),
     host: str = typer.Option("127.0.0.1", "--host", help="Localhost only by default"),
+    reload: bool = typer.Option(
+        False, "--reload", help="Restart when the code changes, for working on scout"
+    ),
 ):
     """Open the dashboard: triage inbox, watchlist funnel, repo detail.
 
@@ -544,10 +547,21 @@ def serve(
     """
     import uvicorn
 
-    from scout.server import create_app
+    from scout import __version__
 
-    console.print(f"scout is at [bold]http://{host}:{port}[/]  (ctrl-c to stop)")
-    uvicorn.run(create_app(), host=host, port=port, log_level="warning")
+    console.print(f"scout {__version__} is at [bold]http://{host}:{port}[/]  (ctrl-c to stop)")
+    if not reload:
+        # A long-running server holds the code it started with. Editing scout and
+        # wondering why the dashboard disagrees is a confusing half hour.
+        console.print("[dim]code changes need a restart, or use --reload[/]")
+    uvicorn.run(
+        "scout.server:app",
+        host=host,
+        port=port,
+        log_level="warning",
+        reload=reload,
+        reload_dirs=[str(Path(__file__).parent)] if reload else None,
+    )
 
 
 @app.command()

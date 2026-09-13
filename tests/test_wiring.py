@@ -140,3 +140,35 @@ def test_thresholds_agree_between_config_and_derivation():
     defaults = inspect.signature(derive.opportunities).parameters
     assert defaults["stale_assignment_days"].default == settings.stale_assignment_days
     assert defaults["abandoned_pr_days"].default == settings.abandoned_pr_days
+
+
+def test_the_app_exists_at_module_scope_for_the_reloader():
+    """uvicorn's --reload takes an import string, not an instance. If this stops being a
+    module attribute, --reload breaks at startup rather than in the tests."""
+    from scout import server
+
+    assert hasattr(server, "app")
+
+
+def test_serve_points_uvicorn_at_that_import_string():
+    import inspect
+
+    from scout import cli
+
+    source = inspect.getsource(cli.serve)
+    assert '"scout.server:app"' in source
+
+
+def test_the_old_token_message_is_gone():
+    """It survived in a running process long after it left the source, which sent an
+    hour of debugging at the token instead of at the code."""
+    from scout import github
+
+    source = Path(github.__file__).read_text(encoding="utf-8")
+    live = [
+        line
+        for line in source.splitlines()
+        if "token rejected" in line and not line.strip().startswith("#")
+        and "rights to that resource" not in line
+    ]
+    assert not live, f"the replaced message is still raised: {live}"
