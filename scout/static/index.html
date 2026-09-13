@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>scout</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;450;600&display=swap" rel="stylesheet">
+<style>
+/* Survey paper, not a dashboard. Cool ground, ink that has blue in it, and one idea
+   carried everywhere: anything with magnitude is drawn as a measured line against a
+   scale. Never a bare number, because a bare number hides how much was measured. */
+:root{
+  --ground:#e9edef; --surface:#fcfdfd; --ink:#1b2733; --muted:#607281;
+  --rule:#c6d1d8; --rule-soft:#dde5e9;
+  --dead:#8a94a0; --trap:#b03a2b; --thin:#bd8420; --viable:#37788a; --good:#2c7a4b;
+  --report:#4b5a94;
+  --focus:#37788a;
+  --step-0:0.9375rem; --step-1:1.1719rem; --step-2:1.4648rem; --step-3:1.8311rem;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font:400 var(--step-0)/1.55 "IBM Plex Sans",system-ui,sans-serif;
+  font-feature-settings:"tnum" 1;
+}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:0.94em}
+a{color:inherit}
+button{font:inherit;color:inherit;cursor:pointer}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:2px}
+
+/* ---- frame ---- */
+.bar{
+  display:flex;align-items:baseline;gap:1.75rem;flex-wrap:wrap;
+  padding:1rem 1.5rem;border-bottom:1px solid var(--rule);background:var(--surface);
+  position:sticky;top:0;z-index:20;
+}
+.wordmark{font-weight:600;letter-spacing:-0.015em;font-size:var(--step-1);margin-right:0.25rem}
+.views{display:flex;gap:1.25rem}
+.views button{background:none;border:0;padding:0 0 0.2rem;border-bottom:2px solid transparent;color:var(--muted)}
+.views button[aria-current="true"]{color:var(--ink);border-bottom-color:var(--ink);font-weight:450}
+.bar .right{margin-left:auto;display:flex;align-items:baseline;gap:1rem;color:var(--muted);font-size:0.875rem}
+.act{
+  background:var(--surface);border:1px solid var(--rule);border-radius:3px;
+  padding:0.3rem 0.7rem;font-size:0.875rem;
+}
+.act:hover{border-color:var(--ink)}
+.act[disabled]{opacity:0.45;cursor:default}
+.act.primary{background:var(--ink);color:var(--surface);border-color:var(--ink)}
+main{max-width:63rem;margin:0 auto;padding:2.5rem 1.5rem 5rem}
+h1{font-size:var(--step-3);font-weight:600;letter-spacing:-0.02em;margin:0 0 0.15rem}
+.lede{color:var(--muted);margin:0 0 2.25rem;max-width:48ch}
+h2{font-size:var(--step-1);font-weight:600;margin:2.5rem 0 0.75rem;letter-spacing:-0.01em}
+
+/* ---- the measured line ---- */
+.scale{display:block;width:100%;height:14px;overflow:visible}
+.scale .track{stroke:var(--rule-soft);stroke-width:1}
+.scale .band{stroke-width:6;stroke-linecap:butt}
+.scale .pt{stroke:var(--ink);stroke-width:1.5}
+.scale .tick{stroke:var(--rule);stroke-width:1}
+.measure{display:grid;grid-template-columns:1fr auto;gap:0 0.75rem;align-items:center}
+.measure .read{font-size:0.8125rem;color:var(--muted);white-space:nowrap}
+
+/* ---- inbox ---- */
+.item{
+  display:grid;grid-template-columns:2px 1fr;gap:0 1rem;
+  background:var(--surface);border-radius:0 2px 2px 0;padding:0;margin-bottom:0.5rem;
+}
+.item .edge{border-radius:0}
+.item .body{padding:0.875rem 1.125rem 0.9375rem 0}
+.item .head{display:flex;gap:0.625rem;align-items:baseline;flex-wrap:wrap}
+.item .what{font-weight:450}
+.item .where{color:var(--muted);font-size:0.875rem;margin-left:auto}
+.item .title{margin:0.25rem 0 0.15rem;line-height:1.4}
+.item .note{color:var(--muted);font-size:0.875rem}
+.item .foot{display:flex;align-items:center;gap:1.25rem;margin-top:0.75rem}
+.item .age{flex:1;max-width:19rem}
+.item .tools{display:flex;gap:0.5rem;margin-left:auto}
+.item .tools button{background:none;border:0;color:var(--muted);font-size:0.8125rem;padding:0.15rem 0;border-bottom:1px solid transparent}
+.item .tools button:hover{color:var(--ink);border-bottom-color:var(--rule)}
+
+/* ---- funnel ---- */
+.funnel{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(11.5rem,1fr);
+  gap:1rem;align-items:start;overflow-x:auto;padding-bottom:0.5rem}
+.col h3{margin:0 0 0.625rem;font-size:0.875rem;font-weight:450;color:var(--muted);
+  padding-bottom:0.375rem;border-bottom:1px solid var(--rule)}
+.col h3 span{color:var(--ink);font-weight:600}
+.repo{
+  background:var(--surface);border:1px solid var(--rule-soft);border-radius:3px;
+  padding:0.75rem 0.875rem;margin-bottom:0.625rem;width:100%;text-align:left;
+  border-left:3px solid var(--rule);
+}
+.repo:hover{border-color:var(--rule);border-left-color:var(--ink)}
+.repo .name{font-weight:500;word-break:break-all;display:block;margin-bottom:0.45rem}
+.repo .why{color:var(--muted);font-size:0.8125rem;margin-top:0.4rem;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.chip{font-size:0.75rem;font-weight:500;letter-spacing:0.01em}
+
+/* ---- detail ---- */
+.metrics{border-top:1px solid var(--rule)}
+.metric{display:grid;grid-template-columns:13rem 1fr;gap:0 1.5rem;
+  padding:0.875rem 0;border-bottom:1px solid var(--rule-soft);align-items:start}
+.metric .label{display:flex;gap:0.4rem;align-items:baseline}
+.metric .label button{background:none;border:0;color:var(--muted);padding:0;
+  width:1.1rem;height:1.1rem;border:1px solid var(--rule);border-radius:50%;
+  font-size:0.7rem;line-height:1;flex:none}
+.metric .label button:hover{border-color:var(--ink);color:var(--ink)}
+.metric .sub{color:var(--muted);font-size:0.8125rem;margin-top:0.2rem}
+.explain{grid-column:1/-1;background:var(--ground);border-left:2px solid var(--rule);
+  padding:0.75rem 1rem;margin:0.75rem 0 0.25rem;font-size:0.875rem;max-width:58ch}
+.explain p{margin:0 0 0.5rem}
+.explain p:last-child{margin:0;color:var(--muted)}
+.reasons{margin:0.5rem 0 0;padding:0;list-style:none}
+.reasons li{padding-left:0.9rem;position:relative;color:var(--muted);margin-bottom:0.2rem}
+.reasons li::before{content:"";position:absolute;left:0;top:0.62em;width:5px;height:1px;background:var(--rule)}
+
+/* ---- states ---- */
+.empty{background:var(--surface);border:1px dashed var(--rule);border-radius:3px;
+  padding:2.5rem 2rem;text-align:center;color:var(--muted)}
+.empty strong{display:block;color:var(--ink);font-weight:450;margin-bottom:0.35rem}
+.flash{position:fixed;left:50%;transform:translateX(-50%);bottom:1.5rem;z-index:40;
+  background:var(--ink);color:var(--surface);padding:0.6rem 1.1rem;border-radius:3px;
+  font-size:0.875rem;max-width:min(90vw,36rem)}
+.flash.bad{background:var(--trap)}
+.back{background:none;border:0;color:var(--muted);padding:0;margin-bottom:1.25rem;
+  border-bottom:1px solid var(--rule)}
+.working{animation:pulse 1.1s ease-in-out infinite}
+@keyframes pulse{50%{opacity:0.45}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+@media (max-width:640px){
+  .metric{grid-template-columns:1fr;gap:0.35rem}
+  .item .foot{flex-wrap:wrap}
+  main{padding-top:1.75rem}
+}
+</style>
+</head>
+<body>
+<nav class="bar">
+  <span class="wordmark">scout</span>
+  <div class="views" role="tablist">
+    <button role="tab" data-view="inbox" aria-current="true">Inbox</button>
+    <button role="tab" data-view="watchlist">Watchlist</button>
+  </div>
+  <div class="right">
+    <span id="pollstate">reading the log</span>
+    <button class="act" id="poll">Check for changes</button>
+  </div>
+</nav>
+<main id="main"></main>
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const el = (t, a = {}, kids = []) => {
+  const n = document.createElement(t);
+  for (const [k, v] of Object.entries(a)) {
+    if (k === "class") n.className = v;
+    else if (k === "text") n.textContent = v;
+    else if (k === "html") n.innerHTML = v;
+    else if (v !== null && v !== undefined) n.setAttribute(k, v);
+  }
+  for (const kid of [].concat(kids)) if (kid) n.append(kid);
+  return n;
+};
+const VERDICT = {DEAD:"var(--dead)", TRAP:"var(--trap)", THIN:"var(--thin)",
+                 VIABLE:"var(--viable)", GOOD:"var(--good)"};
+const SAYS = {DEAD:"Dead", TRAP:"Trap", THIN:"Can't tell yet", VIABLE:"Viable", GOOD:"Good"};
+// Kinds, not quality. An abandoned pull request is often the most valuable thing here -
+// eighty per cent finished - so it must not be drawn in the colour that means "dead".
+const KIND = {unassigned:"var(--good)", "abandoned-pr":"var(--viable)",
+              "stale-assignment":"var(--thin)", "unanswered-report":"var(--report)",
+              ready_for_review:"var(--good)"};
+// One name per thing, everywhere. The server sends these for the inbox; the detail view
+// has to use the same words or the two screens describe the same work differently.
+const HEADLINE = {unassigned:"just came free", "abandoned-pr":"half-finished, author gone",
+                  "stale-assignment":"assigned, then abandoned",
+                  "unanswered-report":"nobody has replied",
+                  ready_for_review:"left draft"};
+
+let glossary = {}, state = {view:"inbox", repo:null};
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || `Request failed (${res.status})`);
+  return body;
+}
+function flash(message, bad) {
+  $(".flash")?.remove();
+  const node = el("div", {class:`flash${bad ? " bad" : ""}`, role:"status", text:message});
+  document.body.append(node);
+  setTimeout(() => node.remove(), bad ? 7000 : 3500);
+}
+
+/* The signature element. A range drawn against a fixed scale, so a wide band reads as
+   "cannot tell" before any of the numbers are read. */
+function scaleBar({lower, upper, point, max = 0.3, color = "var(--viable)", ticks = true}) {
+  const W = 240, H = 14, y = 8;
+  const x = v => Math.max(0, Math.min(1, v / max)) * W;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "scale");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("aria-hidden", "true");
+  const line = (cls, x1, y1, x2, y2, stroke) =>
+    `<line class="${cls}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"${stroke ? ` stroke="${stroke}"` : ""}/>`;
+  let out = line("track", 0, y, W, y);
+  if (ticks) for (let i = 1; i < 4; i++) out += line("tick", (W / 4) * i, y - 4, (W / 4) * i, y + 4);
+  out += line("band", x(lower), y, Math.max(x(upper), x(lower) + 2), y, color);
+  if (point !== undefined) out += line("pt", x(point), y - 5, x(point), y + 5);
+  svg.innerHTML = out;
+  return svg;
+}
+const measure = (bar, reading) =>
+  el("div", {class:"measure"}, [bar, el("span", {class:"read", text:reading})]);
+
+const pct = v => `${(v * 100).toFixed(v < 0.1 ? 1 : 0)}%`;
+const ago = iso => {
+  if (!iso) return "never";
+  const mins = Math.round((Date.now() - new Date(iso)) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1440) return `${Math.round(mins / 60)}h ago`;
+  return `${Math.round(mins / 1440)}d ago`;
+};
+
+/* ---------- inbox ---------- */
+async function renderInbox() {
+  const main = $("#main");
+  main.replaceChildren(el("p", {class:"lede working", text:"Reading the log…"}));
+  const [{items}, overview] = await Promise.all([api("/api/inbox"), api("/api/overview")]);
+  $("#pollstate").textContent = overview.last_poll
+    ? `${overview.polled_count} repos watched, checked ${ago(overview.last_poll)}`
+    : "never checked";
+
+  const frag = document.createDocumentFragment();
+  frag.append(el("h1", {text:"Tonight"}));
+  frag.append(el("p", {class:"lede", text: items.length
+    ? `${items.length} ${items.length === 1 ? "thing" : "things"} nobody is racing for. Beginner-labelled issues are left out on purpose — you cannot win that race from here.`
+    : "Nothing waiting."}));
+
+  if (!items.length) {
+    frag.append(el("div", {class:"empty"}, [
+      el("strong", {text: overview.polled_count ? "Nothing new since the last check." : "No repositories are being watched yet."}),
+      el("span", {text: overview.polled_count
+        ? "Work shows up here once it has sat long enough to be uncontested."
+        : "Add a repository on the Watchlist tab, build it, then mark it green."})]));
+  }
+
+  const oldest = Math.max(90, ...items.map(i => i.idle_days));
+  for (const item of items) {
+    const body = el("div", {class:"body"}, [
+      el("div", {class:"head"}, [
+        el("span", {class:"what", text:item.headline}),
+        el("span", {class:"where mono", text:`${item.repo} #${item.number}`})]),
+      el("p", {class:"title", text:item.title || `#${item.number}`}),
+      el("div", {class:"note", text:item.note}),
+      el("div", {class:"foot"}, [
+        el("div", {class:"age"}, measure(
+          scaleBar({lower:0, upper:item.idle_days, point:undefined, max:oldest,
+                    color:KIND[item.kind] || "var(--muted)", ticks:false}),
+          `${item.idle_days}d untouched`)),
+        el("div", {class:"tools"}, [
+          el("a", {class:"act", href:item.url, target:"_blank", rel:"noopener",
+                   text:"Open on GitHub"}),
+          el("button", {"data-intent":"snooze", "data-key":item.key, text:"Later"}),
+          el("button", {"data-intent":"dismiss", "data-key":item.key, text:"Not for me"})])])]);
+    frag.append(el("div", {class:"item"}, [
+      el("div", {class:"edge", style:`background:${KIND[item.kind] || "var(--rule)"}`}), body]));
+  }
+  main.replaceChildren(frag);
+}
+
+/* ---------- watchlist ---------- */
+async function renderWatchlist() {
+  const main = $("#main");
+  main.replaceChildren(el("p", {class:"lede working", text:"Reading the watchlist…"}));
+  const data = await api("/api/overview");
+
+  const frag = document.createDocumentFragment();
+  frag.append(el("h1", {text:"Watchlist"}));
+  frag.append(el("p", {class:"lede", text:
+    `${data.polled_count} of ${data.repos.length} are built and watched. Five you can build beat fifty you cannot — a repository you cannot get to a passing test suite is one you will never touch on a weeknight.`}));
+
+  const form = el("form", {class:"measure", style:"grid-template-columns:1fr auto;margin-bottom:2rem"}, [
+    el("input", {id:"newrepo", placeholder:"owner/repo", "aria-label":"Repository to add",
+      style:"padding:0.5rem 0.7rem;border:1px solid var(--rule);border-radius:3px;background:var(--surface);font:inherit;width:100%"}),
+    el("button", {class:"act primary", type:"submit", text:"Probe and add"})]);
+  form.addEventListener("submit", async e => {
+    e.preventDefault();
+    const repo = $("#newrepo").value.trim();
+    if (!repo) return;
+    await runJob(e.submitter, "Probing…", () =>
+      api("/api/probe", {method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({repo})}).then(r => {
+          flash(`${r.health.full_name}: ${r.health.verdict} (${r.points_spent} points)`);
+          renderWatchlist();
+        }));
+  });
+  frag.append(form);
+
+  const columns = el("div", {class:"funnel"});
+  for (const status of data.statuses) {
+    const mine = data.repos.filter(r => r.status === status);
+    const col = el("div", {class:"col"}, el("h3", {html:`${status} <span>${mine.length}</span>`}));
+    for (const repo of mine) {
+      // The visible name is inside spans the accessibility tree does not always reach,
+      // so say it explicitly - and say the verdict too, since the colour carries it.
+      const card = el("button", {class:"repo", "data-repo":repo.full_name,
+        "aria-label":`${repo.full_name}, ${SAYS[repo.verdict] || "not probed"}`,
+        style:`border-left-color:${VERDICT[repo.verdict] || "var(--rule)"}`}, [
+        el("span", {class:"name mono", text:repo.full_name}),
+        el("span", {class:"chip", style:`color:${VERDICT[repo.verdict] || "var(--muted)"}`,
+                    text:SAYS[repo.verdict] || "not probed"})]);
+      if (repo.newness_lower !== undefined) {
+        card.append(measure(
+          scaleBar({lower:repo.newness_lower, upper:repo.newness_point, point:repo.newness_point,
+                    color:VERDICT[repo.verdict] || "var(--viable)"}),
+          pct(repo.newness_point)));
+      }
+      if (repo.cold_start_minutes !== undefined)
+        card.append(el("div", {class:"why", text:`${repo.cold_start_minutes} min to a green suite`}));
+      if (repo.why) card.append(el("div", {class:"why", text:repo.why}));
+      col.append(card);
+    }
+    if (!mine.length) col.append(el("div", {class:"why", style:"color:var(--muted);font-size:0.8125rem", text:"—"}));
+    columns.append(col);
+  }
+  frag.append(columns);
+  main.replaceChildren(frag);
+}
+
+/* ---------- detail ---------- */
+function metricRow(key, label, value, sub) {
+  const row = el("div", {class:"metric"});
+  const labelCell = el("div", {class:"label"}, el("span", {text:label}));
+  if (glossary[key])
+    labelCell.append(el("button", {"data-explain":key, "aria-label":`What ${label} means`, text:"?"}));
+  row.append(labelCell, el("div", {}, [value, sub ? el("div", {class:"sub", text:sub}) : null]));
+  return row;
+}
+
+async function renderDetail(full) {
+  const main = $("#main");
+  main.replaceChildren(el("p", {class:"lede working", text:"Reading the last probe…"}));
+  const detail = await api(`/api/repo/${full}`);
+
+  const frag = document.createDocumentFragment();
+  const back = el("button", {class:"back", text:"Back to watchlist"});
+  back.addEventListener("click", () => { state.view = "watchlist"; route(); });
+  frag.append(back, el("h1", {class:"mono", text:full}));
+
+  const head = el("div", {class:"measure", style:"grid-template-columns:1fr auto;margin-bottom:2rem"});
+  head.append(
+    el("p", {class:"lede", style:"margin:0",
+      text: detail.probed_at ? `Last probed ${ago(detail.probed_at)}.` : "Not probed yet."}),
+    el("button", {class:"act", id:"reprobe", text: detail.probed_at ? "Probe again" : "Probe now"}));
+  frag.append(head);
+
+  const h = detail.health;
+  if (!h) {
+    frag.append(el("div", {class:"empty"}, [
+      el("strong", {text:"Nothing measured yet."}),
+      el("span", {text:"Probing reads about four pages from GitHub, roughly four of the five thousand requests you get each hour."})]));
+  } else {
+    frag.append(el("p", {class:"lede", text:h.description || ""}));
+    const verdictRow = el("div", {}, [
+      el("span", {class:"chip", style:`color:${VERDICT[h.verdict]};font-size:var(--step-1)`,
+                  text:SAYS[h.verdict] || h.verdict}),
+      el("ul", {class:"reasons"}, h.reasons.map(r => el("li", {text:r})))]);
+
+    frag.append(el("div", {class:"metrics"}, [
+      metricRow("verdict", "Verdict", verdictRow),
+      metricRow("newness", "Somebody's first merge",
+        h.newness_sufficient
+          ? measure(scaleBar({lower:h.newness.lower, upper:h.newness.upper, point:h.newness.point,
+                              color:VERDICT[h.verdict]}),
+                    `${pct(h.newness.lower)}–${pct(h.newness.upper)}`)
+          : el("span", {text:"Cannot tell yet"}),
+        h.newness_sufficient
+          ? `${h.newness.successes} of ${h.newness.total} merges over ${Math.round(h.newness_scored_days)} days`
+          : h.newness_note),
+      metricRow("outsider_rate", "Merges from outside",
+        measure(scaleBar({lower:h.outsider_rate.lower, upper:h.outsider_rate.upper,
+                          point:h.outsider_rate.point, max:1}), pct(h.outsider_rate.point)),
+        `${h.merged_sample} merged pull requests sampled${h.bots_excluded ? `, ${h.bots_excluded} bot merges left out` : ""}`),
+      metricRow("reply", "Reply time to outsiders",
+        el("span", {text: h.median_hours_to_reply === null ? "No replies in the sample"
+          : h.median_hours_to_reply < 48 ? `${Math.round(h.median_hours_to_reply)} hours`
+          : `${Math.round(h.median_hours_to_reply / 24)} days`}),
+        h.unanswered.total ? `${h.unanswered.successes} of ${h.unanswered.total} never answered` : null),
+      metricRow("overlap", "Active while you are free",
+        el("span", {text: h.overlap === null ? "Not enough activity to tell" : pct(h.overlap)}),
+        h.timezone_note),
+      metricRow("cold_start", "Cold start",
+        el("span", {text: detail.entry?.cold_start_minutes !== undefined
+          ? `${detail.entry.cold_start_minutes} minutes` : "Not measured"}),
+        detail.entry?.test || "Build it once, then record the command that runs its tests"),
+      metricRow("coverage", "How much scout saw", el("span", {text:h.merged_coverage}),
+        h.coverage_partial ? "Raise the page budget to reach further back" : null)]));
+  }
+
+  if (detail.opportunities.length) {
+    frag.append(el("h2", {text:"Open here now"}));
+    for (const o of detail.opportunities.slice(0, 8))
+      frag.append(el("div", {class:"item"}, [
+        el("div", {class:"edge", style:`background:${KIND[o.kind] || "var(--rule)"}`}),
+        el("div", {class:"body"}, [
+          el("div", {class:"head"}, [
+            el("span", {class:"what", text:HEADLINE[o.kind] || o.kind.replace(/-/g, " ")}),
+            el("span", {class:"where mono", text:`#${o.number}`})]),
+          el("p", {class:"title"}, el("a", {href:o.url, target:"_blank", rel:"noopener",
+            text:o.title || `#${o.number}`})),
+          el("div", {class:"note", text:`${o.note}, ${o.idle_days}d untouched`})])]));
+  }
+
+  frag.append(el("h2", {text:"Status"}));
+  const picker = el("div", {class:"measure", style:"grid-template-columns:auto 1fr;max-width:30rem"});
+  const select = el("select", {"aria-label":"Status",
+    style:"padding:0.45rem 0.6rem;border:1px solid var(--rule);border-radius:3px;background:var(--surface);font:inherit"});
+  for (const s of ["candidate","building","green","active","rejected"])
+    select.append(el("option", {value:s, selected: detail.entry?.status === s ? "selected" : null, text:s}));
+  select.addEventListener("change", async () => {
+    await api("/api/mark", {method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({repo:full, status:select.value})});
+    flash(`${full} is now ${select.value}`);
+  });
+  picker.append(select, el("span", {class:"read",
+    text:"Only green and active repositories are watched for new work."}));
+  frag.append(picker);
+  main.replaceChildren(frag);
+
+  $("#reprobe").addEventListener("click", e =>
+    runJob(e.target, "Probing…", async () => {
+      const r = await api("/api/probe", {method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({repo:full})});
+      flash(`${SAYS[r.health.verdict] || r.health.verdict} — ${r.points_spent} of your hourly requests`);
+      renderDetail(full);
+    }));
+}
+
+/* ---------- plumbing ---------- */
+async function runJob(button, label, work) {
+  const original = button && button.textContent;
+  if (button) { button.disabled = true; button.textContent = label; button.classList.add("working"); }
+  try { await work(); }
+  catch (err) { flash(err.message, true); }
+  finally { if (button) { button.disabled = false; button.textContent = original; button.classList.remove("working"); } }
+}
+
+document.addEventListener("click", async e => {
+  const view = e.target.closest("[data-view]");
+  if (view) { state.view = view.dataset.view; state.repo = null; return route(); }
+
+  const repo = e.target.closest("[data-repo]");
+  if (repo) { state.view = "detail"; state.repo = repo.dataset.repo; return route(); }
+
+  const intent = e.target.closest("[data-intent]");
+  if (intent) {
+    const row = intent.closest(".item");
+    await api("/api/intent", {method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({key:intent.dataset.key, action:intent.dataset.intent})});
+    row.remove();
+    flash(intent.dataset.intent === "snooze" ? "Hidden until it changes" : "Won't show again");
+    return;
+  }
+
+  const explain = e.target.closest("[data-explain]");
+  if (explain) {
+    const row = explain.closest(".metric");
+    const open = row.querySelector(".explain");
+    if (open) return open.remove();
+    const entry = glossary[explain.dataset.explain];
+    row.append(el("div", {class:"explain"}, [
+      el("p", {text:entry.body}), el("p", {text:entry.how})]));
+  }
+});
+
+$("#poll").addEventListener("click", e =>
+  runJob(e.target, "Checking…", async () => {
+    const r = await api("/api/poll", {method:"POST"});
+    flash(r.note || `${r.written} new from ${r.polled} repos, ${r.unchanged} unchanged`);
+    route();
+  }));
+
+function route() {
+  for (const b of document.querySelectorAll("[data-view]"))
+    b.setAttribute("aria-current", String(b.dataset.view === state.view));
+  if (state.view === "detail") return renderDetail(state.repo);
+  return state.view === "watchlist" ? renderWatchlist() : renderInbox();
+}
+
+api("/api/glossary")
+  .then(g => { glossary = g; })
+  .finally(route);
+</script>
+</body>
+</html>
