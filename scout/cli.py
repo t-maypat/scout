@@ -157,6 +157,7 @@ def _entry_from(health: RepoHealth, existing: watchlist.WatchedRepo | None, why:
     entry.verdict_reasons = reasons
     entry.outsider_merge_rate = round(health.outsider_merge_rate.point, 3)
     entry.newness_lower = round(health.newness.lower, 4)
+    entry.newness_sufficient = health.newness_sufficient
     entry.newness_point = round(health.newness.point, 4)
     entry.cold_merges = health.cold_merges
     entry.maintainer_utc_offset = health.maintainer_utc_offset

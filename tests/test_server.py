@@ -191,3 +191,10 @@ class TestEveryRouteLoads:
     def test_an_unknown_repo_detail_is_empty_not_an_error(self, client):
         body = client.get("/api/repo/acme/widget").json()
         assert body["entry"] is None and body["health"] is None
+
+
+def test_the_dashboard_is_not_cached_across_upgrades(client):
+    """One file holds the whole interface, so a cached copy would show yesterday's UI
+    against today's API."""
+    cache = client.get("/").headers.get("cache-control", "")
+    assert "no-cache" in cache

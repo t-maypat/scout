@@ -85,10 +85,9 @@ h2{font-size:var(--step-1);font-weight:600;margin:2.5rem 0 0.75rem;letter-spacin
 .item .tools button:hover{color:var(--ink);border-bottom-color:var(--rule)}
 
 /* ---- next step ---- */
-.nextstep{background:var(--surface);border-left:3px solid var(--accent-step);
-  padding:1rem 1.25rem;margin:0 0 2rem;border-radius:0 3px 3px 0;max-width:46rem}
-.nextstep .doit{margin:0;font-weight:450;font-size:var(--step-1);letter-spacing:-0.01em}
-.nextstep .whyit{margin:0.35rem 0 0;color:var(--muted);font-size:0.9375rem}
+.nextstep{margin:-1.5rem 0 2rem;max-width:46rem;font-size:0.9375rem;color:var(--muted)}
+.nextstep .cue{color:var(--accent-step);font-weight:500;margin-right:0.4rem}
+.nextstep .doit{color:var(--ink)}
 .addrepo{display:grid;grid-template-columns:1fr auto;gap:0.625rem;max-width:34rem;
   margin-bottom:2.5rem}
 .addrepo input{padding:0.5rem 0.7rem;border:1px solid var(--rule);border-radius:3px;
@@ -97,11 +96,14 @@ h2{font-size:var(--step-1);font-weight:600;margin:2.5rem 0 0.75rem;letter-spacin
 
 /* ---- funnel ---- */
 .funnel{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(11.5rem,1fr);
-  gap:1rem;align-items:start;overflow-x:auto;padding-bottom:0.5rem}
+  gap:1rem;align-items:start;overflow-x:auto;padding-bottom:0.5rem;
+  scroll-snap-type:x proximity;overscroll-behavior-x:contain}
+.col{scroll-snap-align:start}
 .col h3{margin:0 0 0.625rem;font-size:0.875rem;font-weight:450;color:var(--muted);
   padding-bottom:0.375rem;border-bottom:1px solid var(--rule)}
 .col h3 span{color:var(--ink);font-weight:600}
-.colnote{margin:0 0 0.75rem;font-size:0.8125rem;line-height:1.45;color:var(--muted)}
+.colnote{margin:0 0 0.75rem;font-size:0.8125rem;line-height:1.45;color:var(--muted);
+  min-height:2.9em}
 .colempty{font-size:0.8125rem;color:var(--rule)}
 .repo{
   background:var(--surface);border:1px solid var(--rule-soft);border-radius:3px;
@@ -147,8 +149,19 @@ h2{font-size:var(--step-1);font-weight:600;margin:2.5rem 0 0.75rem;letter-spacin
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 @media (max-width:640px){
   .metric{grid-template-columns:1fr;gap:0.35rem}
-  .item .foot{flex-wrap:wrap}
-  main{padding-top:1.75rem}
+  .item .foot{flex-wrap:wrap;gap:0.75rem}
+  .item .age{max-width:none;flex-basis:100%}
+  .item .tools{margin-left:0}
+  .item .where{margin-left:0;flex-basis:100%}
+  main{padding:1.75rem 1.1rem 4rem}
+  h1{font-size:var(--step-2)}
+  .nextstep{margin-top:-1rem}
+}
+@media (max-width:520px){
+  /* Once the bar wraps, margin-left:auto strands the controls mid-row. */
+  .bar{gap:0.75rem 1.25rem;padding:0.75rem 1.1rem}
+  .bar .right{margin-left:0;width:100%;justify-content:space-between}
+  .addrepo{grid-template-columns:1fr}
 }
 </style>
 </head>
@@ -205,12 +218,30 @@ const KIND = {unassigned:"var(--good)", "abandoned-pr":"var(--viable)",
               ready_for_review:"var(--good)"};
 // One name per thing, everywhere. The server sends these for the inbox; the detail view
 // has to use the same words or the two screens describe the same work differently.
+// Kinds where the interesting fact is that it changed, not how long it has sat.
+const FRESH = new Set(["unassigned", "ready_for_review"]);
 const HEADLINE = {unassigned:"just came free", "abandoned-pr":"half-finished, author gone",
                   "stale-assignment":"assigned, then abandoned",
                   "unanswered-report":"nobody has replied",
                   ready_for_review:"left draft"};
 
-let glossary = {}, state = {view:"watchlist", repo:null};
+// The view lives in the URL so browser back works, a refresh keeps your place, and a
+// repository can be linked to. Without this, every click is a dead end for the back
+// button - which on a three-view app is the first thing a person tries.
+function readHash() {
+  const raw = decodeURIComponent(location.hash.slice(1));
+  if (raw.startsWith("repo/")) return {view:"detail", repo:raw.slice(5)};
+  if (raw === "inbox" || raw === "watchlist") return {view:raw, repo:null};
+  return {view:"watchlist", repo:null};
+}
+
+function go(view, repo = null) {
+  const hash = view === "detail" ? `#repo/${repo}` : `#${view}`;
+  if (location.hash === hash) { state = {view, repo}; return route(); }
+  location.hash = hash;  // hashchange drives the render
+}
+
+let glossary = {}, state = readHash();
 
 // Above the server's own deadlines (90s probe, 180s poll) so its readable message wins
 // the race. This is the backstop for the server being wedged, not for a slow GitHub.
@@ -267,6 +298,8 @@ const pct = v => `${(v * 100).toFixed(v < 0.1 ? 1 : 0)}%`;
 const ago = iso => {
   if (!iso) return "never";
   const mins = Math.round((Date.now() - new Date(iso)) / 60000);
+  // Clock skew between this machine and whatever wrote the log can put a timestamp in
+  // the future. "-3m ago" is worse than rounding it to now.
   if (mins < 1) return "just now";
   if (mins < 60) return `${mins}m ago`;
   if (mins < 1440) return `${Math.round(mins / 60)}h ago`;
@@ -305,10 +338,14 @@ async function renderInbox() {
       el("p", {class:"title", text:item.title || `#${item.number}`}),
       el("div", {class:"note", text:item.note}),
       el("div", {class:"foot"}, [
-        el("div", {class:"age"}, measure(
-          scaleBar({lower:0, upper:item.idle_days, point:undefined, max:oldest,
-                    color:KIND[item.kind] || "var(--muted)", ticks:false}),
-          `${item.idle_days}d untouched`)),
+        // Something that just came free is news, not an age. An empty bar next to
+        // "0d untouched" measures the wrong thing and says nothing by saying it.
+        el("div", {class:"age"}, FRESH.has(item.kind)
+          ? el("span", {class:"read", text:"free as of today"})
+          : measure(
+              scaleBar({lower:0, upper:item.idle_days, point:undefined, max:oldest,
+                        color:KIND[item.kind] || "var(--muted)", ticks:false}),
+              `${item.idle_days}d untouched`)),
         el("div", {class:"tools"}, [
           el("a", {class:"act", href:item.url, target:"_blank", rel:"noopener",
                    text:"Open on GitHub"}),
@@ -355,9 +392,10 @@ async function renderWatchlist() {
     "Scout answers one question about a project: will it merge a patch from somebody it does not already know? A repository can have forty thousand stars, a busy issue tracker, and still never merge one."}));
 
   const step = nextStep(data.repos);
-  frag.append(el("div", {class:"nextstep"}, [
-    el("p", {class:"doit", text:step.do}),
-    el("p", {class:"whyit", text:step.why})]));
+  frag.append(el("p", {class:"nextstep"}, [
+    el("span", {class:"cue", text:"Next"}),
+    el("span", {class:"doit", text:step.do + " "}),
+    el("span", {text:step.why})]));
 
   const form = el("form", {class:"addrepo"}, [
     el("input", {id:"newrepo", placeholder:"owner/repo", "aria-label":"Repository to add",
@@ -398,7 +436,7 @@ async function renderWatchlist() {
         el("span", {class:"name mono", text:repo.full_name}),
         el("span", {class:"chip", style:`color:${VERDICT[repo.verdict] || "var(--muted)"}`,
                     text:SAYS[repo.verdict] || "not probed"})]);
-      if (repo.newness_lower !== undefined)
+      if (repo.newness_sufficient && repo.newness_lower !== undefined)
         card.append(measure(
           scaleBar({lower:repo.newness_lower, upper:repo.newness_point, point:repo.newness_point,
                     color:VERDICT[repo.verdict] || "var(--viable)"}),
@@ -432,7 +470,7 @@ async function renderDetail(full) {
 
   const frag = document.createDocumentFragment();
   const back = el("button", {class:"back", text:"Back to watchlist"});
-  back.addEventListener("click", () => { state.view = "watchlist"; route(); });
+  back.addEventListener("click", () => go("watchlist"));
   frag.append(back, el("h1", {class:"mono", text:full}));
 
   const head = el("div", {class:"measure", style:"grid-template-columns:1fr auto;margin-bottom:2rem"});
@@ -538,10 +576,10 @@ async function runJob(button, label, work) {
 
 document.addEventListener("click", async e => {
   const view = e.target.closest("[data-view]");
-  if (view) { state.view = view.dataset.view; state.repo = null; return route(); }
+  if (view) return go(view.dataset.view);
 
   const repo = e.target.closest("[data-repo]");
-  if (repo) { state.view = "detail"; state.repo = repo.dataset.repo; return route(); }
+  if (repo) return go("detail", repo.dataset.repo);
 
   const intent = e.target.closest("[data-intent]");
   if (intent) {
@@ -577,6 +615,8 @@ function route() {
   if (state.view === "detail") return renderDetail(state.repo);
   return state.view === "watchlist" ? renderWatchlist() : renderInbox();
 }
+
+window.addEventListener("hashchange", () => { state = readHash(); route(); });
 
 api("/api/glossary")
   .then(g => { glossary = g; })
