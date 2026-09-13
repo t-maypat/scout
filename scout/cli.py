@@ -531,6 +531,24 @@ def replay(
 
 
 @app.command()
+def serve(
+    port: int = typer.Option(8765, "--port"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Localhost only by default"),
+):
+    """Open the dashboard: triage inbox, watchlist funnel, repo detail.
+
+    The CLI handles one repository at a time. This is for the other two jobs - deciding
+    what to spend an evening on, and comparing repositories against each other.
+    """
+    import uvicorn
+
+    from scout.server import create_app
+
+    console.print(f"scout is at [bold]http://{host}:{port}[/]  (ctrl-c to stop)")
+    uvicorn.run(create_app(), host=host, port=port, log_level="warning")
+
+
+@app.command()
 def doctor():
     """Check the token works and report the rate-limit budget."""
     settings = get_settings()

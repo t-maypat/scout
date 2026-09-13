@@ -399,6 +399,35 @@ structurally the same thing at a trivial volume.
 posted without a human tap. That would be spam under the Acceptable Use Policies, and it
 is the thing the read-only guard exists to make impossible by accident.
 
+## The dashboard
+
+```bash
+uv run scout serve
+```
+
+Opens on <http://127.0.0.1:8765>. The CLI is good at one repository at a time; this is
+for the other two jobs - deciding what to spend an evening on, and comparing
+repositories against each other.
+
+- **Inbox** - tonight's work, ranked, each with why nobody is racing for it. Open on
+  GitHub, or hide it. Hiding writes the same record the digest reads, so dismissing here
+  also stops it reaching Discord. No second source of truth.
+- **Watchlist** - the funnel as one row: candidate, building, green, active, rejected.
+  The bottleneck is wherever the cards are piled up.
+- **Repo detail** - the full card, with every metric expandable into a plain-English
+  explanation of what it measures and why it matters.
+
+Opening a repository costs nothing: it reads the last probe out of the event log.
+Re-probing is a button, because it spends rate limit.
+
+Every number with a magnitude is drawn as a measured line against a scale rather than
+printed. A confidence interval rendered as a band makes "cannot tell yet" obvious at a
+glance, which the word `THIN` never manages.
+
+Anything that spends budget - probe, poll - runs behind a single-flight lock and the same
+guards the cron jobs use. A button is easier to click twice than a cron job is to fire
+twice.
+
 ## Tests
 
 ```bash
