@@ -193,8 +193,10 @@ invalidate the ETag every time, so the poller uses a fixed URL and stops reading
 watermark instead. Ten repos every 15 minutes is 40 requests an hour against a limit of
 5000. The rate limit is not the constraint here and never will be.
 
-Toggle a repo in or out with the `poll` field on its watchlist entry. `hot = true` marks
-the rare repo that earns an interrupt instead of waiting for the digest.
+Three gates decide what gets polled, and all must pass: the repo is in `watchlist.toml`,
+its `status` is `green` or `active` (because `poll_only_actionable` defaults true), and
+its `poll` field is true. `scout poll --all` relaxes the second one for a single run;
+`poll = false` is the hand-edited mute for a repo that is mid-release-week and too loud.
 
 ## The event log
 
