@@ -1,6 +1,6 @@
 # scout watchlist. Hand-edited and committed - this is curated data, not config.
 # status: candidate | building | green | active | rejected
-# last written 2026-09-13T09:37:37+00:00
+# last written 2026-09-13T12:03:55+00:00
 
 [[repo]]
 full_name = "BerriAI/litellm"
@@ -10,11 +10,14 @@ poll = true
 setup = ""
 test = ""
 notes = ""
-last_probed = "2026-09-13T06:30:32.183982Z"
+last_probed = "2026-09-13T12:03:55.285387Z"
 verdict = "TRAP"
 verdict_reasons = [
-    "100 PRs merged, none from a first-time contributor",
-    "maintainers answer fewer than 1 in 5 outsider issues",
+    "at least 98% of outsider issues go unanswered (192/192)",
+    "164 bot merges excluded",
 ]
-outsider_merge_rate = 0.8
+outsider_merge_rate = 1.0
 cold_merges = 0
+newness_sufficient = false
+newness_point = 0.0
+newness_lower = 0.0
