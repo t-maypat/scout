@@ -8,6 +8,7 @@ repositories are worth your time before any of that exists.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -550,30 +551,80 @@ def serve(
 
 
 @app.command()
-def doctor():
-    """Check the token works and report the rate-limit budget."""
+def doctor(repo: str = typer.Option("", "--repo", help="Also try probing this one")):
+    """Check the token, the budget, and the settings.
+
+    REST and GraphQL are checked separately on purpose. A fine-grained token can pass
+    one and fail the other, and a single combined "it works" hides exactly the case
+    that is confusing to debug.
+    """
     settings = get_settings()
     console.print(f"watchlist: {watchlist.path().resolve()}")
     console.print(f"languages: {', '.join(settings.language_list)}")
-    start, end = settings.free_hours
-    console.print(f"free hours: {start:02d}:00-{end:02d}:00 {settings.display_tz}")
+    start_hour, end_hour = settings.free_hours
+    console.print(f"free hours: {start_hour:02d}:00-{end_hour:02d}:00 {settings.display_tz}")
+
+    token = settings.token
+    if not token:
+        console.print("[red]no token[/] - put SCOUT_GITHUB_TOKEN in .env")
+        console.print(f"[dim]looked for .env in {Path.cwd()}[/]")
+        raise typer.Exit(1)
+    console.print(
+        f"token: {settings.token_kind}, {len(token)} chars, "
+        f"starts {token[:11]}[dim]...[/]"
+    )
+
+    failures = 0
     with _client() as client:
-        data = client.graphql("query { rateLimit { cost remaining resetAt } viewer { login } }")
-        console.print(f"token: ok, authenticated as [bold]{data['viewer']['login']}[/]")
+        try:
+            data = client.graphql("query { rateLimit { remaining resetAt } viewer { login } }")
+            console.print(
+                f"  graphql [green]ok[/] as [bold]{data['viewer']['login']}[/], "
+                f"{data['rateLimit']['remaining']} points until {data['rateLimit']['resetAt']}"
+            )
+        except GitHubError as exc:
+            failures += 1
+            console.print(f"  graphql [red]failed[/]: {exc}")
+
+        try:
+            response = client.rest_conditional("/rate_limit")
+            core = (response.body or {}).get("resources", {}).get("core", {})
+            console.print(
+                f"  rest    [green]ok[/], {core.get('remaining', '?')} requests left"
+            )
+        except GitHubError as exc:
+            failures += 1
+            console.print(f"  rest    [red]failed[/]: {exc}")
+
+        if repo:
+            try:
+                health = run_probe(client, repo, max_pages=1)
+                console.print(f"  probe   [green]ok[/] on {health.full_name}")
+            except GitHubError as exc:
+                failures += 1
+                console.print(f"  probe   [red]failed[/] on {repo}: {exc}")
+
+    if failures and settings.token_kind == "fine-grained":
+        console.print("")
         console.print(
-            f"budget: {data['rateLimit']['remaining']} points until "
-            f"{data['rateLimit']['resetAt']}"
+            "[yellow]Fine-grained tokens are declined by organisations that have not "
+            "enabled them, and their permissions are per-repository.[/]"
         )
+        console.print(
+            "[dim]A classic token with the public_repo scope avoids both.[/]"
+        )
+
     log = _log()
     console.print(f"event log: {log.count():,} events in {len(log.shards())} shards")
-    settings_now = get_settings()
     console.print(
-        f"safety: {'[green]enabled[/]' if settings_now.enabled else '[yellow]DISABLED[/]'}, "
-        f"read-only, cap {settings_now.max_poll_repos} repos, "
-        f"rate floor {settings_now.rate_limit_floor}"
+        f"safety: {'[green]enabled[/]' if settings.enabled else '[yellow]DISABLED[/]'}, "
+        f"read-only, cap {settings.max_poll_repos} repos, "
+        f"rate floor {settings.rate_limit_floor}"
     )
-    hook = get_settings().discord_webhook_url
+    hook = settings.discord_webhook_url
     console.print(f"discord: {'webhook configured' if hook else '[yellow]no webhook set[/]'}")
+    if failures:
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

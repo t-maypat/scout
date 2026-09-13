@@ -55,6 +55,31 @@ class ConditionalResponse:
         return self.status == 304
 
 
+def _unauthorised(response: httpx.Response, token_kind: str) -> GitHubError:
+    """Say why GitHub refused, rather than substituting a guess.
+
+    "Bad credentials" and "Resource not accessible by personal access token" are wholly
+    different problems - one is the wrong token, the other is the right token without
+    rights to that resource - and answering both with "token rejected" sends you looking
+    in the wrong place.
+    """
+    try:
+        detail = (response.json() or {}).get("message", "")
+    except ValueError:
+        detail = ""
+    detail = detail or "no explanation given"
+
+    hint = ""
+    if "not accessible" in detail.lower() and token_kind == "fine-grained":
+        hint = (
+            " This is a fine-grained token, and organisations can decline them. "
+            "A classic token with the public_repo scope sidesteps that."
+        )
+    elif "bad credentials" in detail.lower():
+        hint = " The token is wrong, revoked, or expired."
+    return GitHubError(f"GitHub refused the token ({token_kind}): {detail}.{hint}")
+
+
 class GitHubClient:
     def __init__(
         self,
@@ -76,7 +101,7 @@ class GitHubClient:
         self._deadline = (
             time.monotonic() + deadline_seconds if deadline_seconds else None
         )
-        self.token = token or settings.github_token
+        self.token = (token or settings.token).strip()
         if not self.token:
             raise GitHubError("no token - set SCOUT_GITHUB_TOKEN in .env")
         self._client = httpx.Client(
@@ -147,7 +172,7 @@ class GitHubClient:
                 self._sleep(retry_after, "waiting out a rate limit")
                 continue
             if response.status_code == 401:
-                raise GitHubError("token rejected - check SCOUT_GITHUB_TOKEN")
+                raise _unauthorised(response, get_settings().token_kind)
             response.raise_for_status()
 
             body = response.json()
@@ -208,7 +233,7 @@ class GitHubClient:
                 self._sleep(retry_after, "waiting out a rate limit")
                 continue
             if response.status_code == 401:
-                raise GitHubError("token rejected - check SCOUT_GITHUB_TOKEN")
+                raise _unauthorised(response, get_settings().token_kind)
             if response.status_code == 404:
                 raise NotFound(path)
 

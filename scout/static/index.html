@@ -148,6 +148,19 @@ h2{font-size:var(--step-1);font-weight:600;margin:2.5rem 0 0.75rem;letter-spacin
 @keyframes pulse{50%{opacity:0.45}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 @media (max-width:640px){
+  /* Stacked, not scrolled. On a phone you are dealing with the projects you are
+     already confident about, not surveying the whole spectrum you are experimenting
+     with - so the watched ones come first and the empty stages get out of the way. */
+  .funnel{grid-auto-flow:row;grid-auto-columns:auto;overflow-x:visible;
+    scroll-snap-type:none;gap:1.75rem}
+  .col[data-status="green"]{order:1}
+  .col[data-status="active"]{order:2}
+  .col[data-status="candidate"]{order:3}
+  .col[data-status="building"]{order:4}
+  .col[data-status="rejected"]{order:5}
+  .col.is-empty{display:none}
+  .colnote{min-height:0}
+  .repo{max-width:none}
   .metric{grid-template-columns:1fr;gap:0.35rem}
   .item .foot{flex-wrap:wrap;gap:0.75rem}
   .item .age{max-width:none;flex-basis:100%}
@@ -426,7 +439,8 @@ async function renderWatchlist() {
   const columns = el("div", {class:"funnel"});
   for (const status of data.statuses) {
     const mine = data.repos.filter(r => r.status === status);
-    const col = el("div", {class:"col"}, [
+    const col = el("div", {class:mine.length ? "col" : "col is-empty",
+                            "data-status":status}, [
       el("h3", {html:`${status} <span>${mine.length}</span>`}),
       el("p", {class:"colnote", text:COLUMN[status] || ""})]);
     for (const repo of mine) {
