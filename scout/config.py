@@ -37,9 +37,24 @@ class Settings(BaseSettings):
     merged_pr_sample: int = 100
     issue_sample: int = 60
     lookback_days: int = 180
-    stale_assignment_days: int = 14
-    abandoned_pr_days: int = 21
+    # 21 and 30 to match derive.py and the documentation. These were 14 and 21 here
+    # while everything else said otherwise, and because probe() passes them explicitly
+    # the documented numbers were never the ones in use.
+    stale_assignment_days: int = 21
+    abandoned_pr_days: int = 30
     contest_window_days: int = 90
+
+    # Silence counts as neglect only once a reply was actually due. Without this a fast
+    # repository looks negligent purely because most of its recent issues are hours old.
+    unanswered_after_hours: float = 72.0
+
+    # Newness. Whether a stranger's first pull request gets merged is the whole question,
+    # and it is derived from author history rather than GitHub's authorAssociation, which
+    # describes how somebody is associated *now* and cannot be trusted about the past.
+    # The burn-in establishes who was already known before anybody is called new.
+    newness_burn_in_days: float = 14.0
+    newness_min_burn_in_merges: int = 30
+    newness_min_scored_merges: int = 40
 
     # Safety. These exist to make a surprise bill or a throttled token impossible by
     # accident; every one of them refuses loudly rather than degrading quietly.
