@@ -27,7 +27,13 @@ def ts(days_ago: float = 0, hour: int | None = None) -> str:
     return stamp.isoformat().replace("+00:00", "Z")
 
 
-def merged_pr(assoc: str, days_ago: float = 10, open_days: float = 3) -> dict:
+def merged_pr(
+    assoc: str,
+    days_ago: float = 10,
+    open_days: float = 3,
+    author: str = "someone",
+    bot: bool = False,
+) -> dict:
     return {
         "number": 1,
         "createdAt": ts(days_ago + open_days),
@@ -35,8 +41,36 @@ def merged_pr(assoc: str, days_ago: float = 10, open_days: float = 3) -> dict:
         "authorAssociation": assoc,
         "additions": 10,
         "deletions": 2,
-        "author": {"login": "someone"},
+        "author": {"__typename": "Bot" if bot else "User", "login": author},
     }
+
+
+def merge_history(
+    *,
+    days: int,
+    per_day: int = 5,
+    new_every: int = 0,
+    assoc: str = "CONTRIBUTOR",
+    bot_every: int = 0,
+) -> list[dict]:
+    """`per_day` merges a day across `days` days, oldest first.
+
+    Every `new_every`-th merge comes from a login never seen before; the rest recycle a
+    small pool of veterans. That is what the derived newness metric actually measures,
+    so the fixtures have to have real author history rather than a single name.
+    """
+    nodes: list[dict] = []
+    n = 0
+    for day in range(days, 0, -1):
+        for _ in range(per_day):
+            n += 1
+            if bot_every and n % bot_every == 0:
+                nodes.append(merged_pr(assoc, days_ago=day, author="dependabot[bot]", bot=True))
+                continue
+            new = new_every and n % new_every == 0
+            login = f"newcomer{n}" if new else f"veteran{n % 8}"
+            nodes.append(merged_pr(assoc, days_ago=day, author=login))
+    return nodes
 
 
 def overview(merged: list[dict], **repo_kwargs) -> dict:
@@ -108,25 +142,38 @@ def build(overview_data, issues_data=None, stale_data=None) -> metrics.RepoHealt
 
 class TestMergeOpenness:
     def test_closed_shop_is_a_trap(self):
-        """Forty merges, every one from the team. The star count is irrelevant."""
-        health = build(overview([merged_pr("MEMBER") for _ in range(40)]))
+        """Six hundred merges across four months, not one of them a new name."""
+        health = build(overview(merge_history(days=120, per_day=5, assoc="MEMBER")))
         label, reasons = metrics.verdict(health)
         assert label == metrics.TRAP
-        assert health.cold_merges == 0
-        assert any("first-time contributor" in r for r in reasons)
+        assert health.newness.successes == 0
+        assert any("closed shop" in r for r in reasons)
+
+    def test_a_small_closed_sample_is_not_enough_to_convict(self):
+        """The whole point of the interval: forty merges cannot settle this either way,
+        and the old absolute-count rule convicted on exactly this evidence."""
+        health = build(overview(merge_history(days=120, per_day=1)))
+        assert health.newness.successes == 0
+        assert health.newness.upper > metrics.CLOSED_SHOP_CEILING
+        assert metrics.verdict(health)[0] != metrics.TRAP
 
     def test_open_repo_is_good(self):
-        merged = [merged_pr("MEMBER") for _ in range(20)]
-        merged += [merged_pr("FIRST_TIME_CONTRIBUTOR") for _ in range(6)]
-        merged += [merged_pr("CONTRIBUTOR") for _ in range(10)]
-        health = build(overview(merged))
-        assert health.cold_merges == 6
-        assert health.outsider_merge_rate == pytest.approx(16 / 36)
+        """One merge in five is somebody's first, across four months."""
+        health = build(overview(merge_history(days=120, per_day=5, new_every=5)))
+        assert health.newness_sufficient
+        assert health.newness.lower > metrics.OPEN_DOOR_FLOOR
         assert metrics.verdict(health)[0] == metrics.GOOD
+
+    def test_bots_are_kept_out_of_the_denominator(self):
+        """Automation merges constantly and is never a newcomer, so leaving it in
+        quietly deflates the rate."""
+        health = build(overview(merge_history(days=120, per_day=5, new_every=5, bot_every=2)))
+        assert health.bots_excluded == 300
+        assert health.newness.total < 300
 
     def test_contributor_counts_as_outsider_but_not_cold(self):
         health = build(overview([merged_pr("CONTRIBUTOR")]))
-        assert health.outsider_merge_rate == 1.0
+        assert health.outsider_merge_rate.point == 1.0
         assert health.cold_merges == 0
 
     def test_merges_outside_the_window_are_ignored(self):
@@ -136,9 +183,10 @@ class TestMergeOpenness:
     def test_too_few_merges_is_thin_not_a_verdict(self):
         health = build(overview([merged_pr("MEMBER") for _ in range(5)]))
         assert metrics.verdict(health)[0] == metrics.THIN
+        assert not health.newness_sufficient
 
     def test_archived_short_circuits_everything(self):
-        merged = [merged_pr("FIRST_TIME_CONTRIBUTOR") for _ in range(30)]
+        merged = merge_history(days=120, per_day=5, new_every=5)
         health = build(overview(merged, isArchived=True))
         assert metrics.verdict(health) == (metrics.DEAD, ["archived"])
 
@@ -166,11 +214,11 @@ class TestResponsiveness:
 
     def test_mostly_ignored_repo_is_a_trap(self):
         nodes = [issue("NONE", days_ago=i) for i in range(1, 13)]
-        merged = [merged_pr("CONTRIBUTOR") for _ in range(25)]
-        health = build(overview(merged), issues_payload(nodes))
+        nodes = [issue("NONE", days_ago=20 + i) for i in range(20)]
+        health = build(overview(merge_history(days=120, new_every=5)), issues_payload(nodes))
         label, reasons = metrics.verdict(health)
         assert label == metrics.TRAP
-        assert any("1 in 5" in r for r in reasons)
+        assert any("go unanswered" in r for r in reasons)
 
 
 class TestContestedness:
@@ -188,8 +236,7 @@ class TestContestedness:
         assert health.beginner_contest_minutes == pytest.approx(20, abs=1)
 
     def test_fast_claims_downgrade_a_healthy_repo_to_viable(self):
-        merged = [merged_pr("FIRST_TIME_CONTRIBUTOR") for _ in range(15)]
-        merged += [merged_pr("MEMBER") for _ in range(15)]
+        merged = merge_history(days=120, per_day=5, new_every=5)
         nodes = [
             issue(
                 "MEMBER",
@@ -321,10 +368,8 @@ class TestOpportunities:
 
 
 def test_ranking_puts_the_open_repo_first():
-    closed = build(overview([merged_pr("MEMBER") for _ in range(40)]))
-    merged = [merged_pr("FIRST_TIME_CONTRIBUTOR") for _ in range(10)]
-    merged += [merged_pr("MEMBER") for _ in range(10)]
-    open_repo = build(overview(merged))
+    closed = build(overview(merge_history(days=120, per_day=5, assoc="MEMBER")))
+    open_repo = build(overview(merge_history(days=120, per_day=5, new_every=5)))
     assert metrics.rank([closed, open_repo])[0] is open_repo
 
 
@@ -379,13 +424,12 @@ class TestCoverage:
         assert health.merged_coverage.capped
         assert not health.merged_coverage.partial
 
-    def test_partial_coverage_is_a_caveat_not_a_downgrade(self):
-        """Five first-timers merged in nine days is stronger evidence than five in six
-        months. Coverage qualifies the latency numbers; it must not touch the verdict."""
-        merged = [merged_pr("FIRST_TIME_CONTRIBUTOR", days_ago=1 + i * 0.09) for i in range(50)]
-        merged += [merged_pr("MEMBER", days_ago=1 + i * 0.09) for i in range(50)]
+    def test_coverage_is_reported_but_no_longer_gates_the_verdict(self):
+        """Coverage was a proxy for 'sample too small to conclude'. The confidence
+        interval measures that directly and continuously, so coverage is now only
+        reported - it still qualifies the latency numbers, which have no interval."""
         health = metrics.build_health(
-            overview(merged),
+            overview(merge_history(days=4, per_day=40, new_every=5)),
             issues_payload([]),
             stale_payload(),
             now=NOW,
@@ -393,9 +437,11 @@ class TestCoverage:
             issues_requested=60,
             **WINDOW,
         )
-        label, reasons = metrics.verdict(health)
-        assert label == metrics.GOOD
-        assert any("under-counted" in r for r in reasons)
+        assert health.merged_coverage.partial
+        assert metrics.coverage_caveats(health)
+        # The interval, not the coverage flag, is what refuses here.
+        assert not health.newness_sufficient
+        assert metrics.verdict(health)[0] == metrics.THIN
 
     def test_unknown_page_size_never_claims_to_be_capped(self):
         health = build(overview([merged_pr("MEMBER") for _ in range(40)]))
@@ -446,12 +492,12 @@ class TestFastRepoIsNotATrap:
     def test_it_refuses_to_judge_rather_than_guessing(self):
         label, reasons = metrics.verdict(self.litellm_shaped())
         assert label == metrics.THIN
-        assert any("too fast" in r for r in reasons)
-        assert any("larger --sample" in r for r in reasons)
+        assert any("burn-in" in r for r in reasons)
+        assert any("--pages" in r for r in reasons)
 
     def test_the_rate_is_still_reported_because_a_rate_survives_a_short_window(self):
         health = self.litellm_shaped()
-        assert health.outsider_merge_rate == pytest.approx(0.8)
+        assert health.outsider_merge_rate.point == pytest.approx(0.8)
         assert any("80% of merges came from outside" in r for r in metrics.verdict(health)[1])
 
     def test_issues_younger_than_the_threshold_are_not_counted_as_ignored(self):
@@ -461,9 +507,9 @@ class TestFastRepoIsNotATrap:
         assert health.outsider_issues == 0
 
     def test_genuinely_old_silence_still_counts(self):
-        nodes = [issue("NONE", days_ago=20 + i) for i in range(12)]
+        nodes = [issue("NONE", days_ago=20 + i) for i in range(24)]
         health = metrics.build_health(
-            overview([merged_pr("CONTRIBUTOR") for _ in range(25)]),
+            overview(merge_history(days=120, new_every=5)),
             issues_payload(nodes),
             stale_payload(),
             now=NOW,
@@ -472,21 +518,80 @@ class TestFastRepoIsNotATrap:
             unanswered_after_hours=72.0,
             **WINDOW,
         )
-        assert health.unanswered_outsider_issues == 12
+        assert health.unanswered_outsider_issues == 24
         assert metrics.verdict(health)[0] == metrics.TRAP
 
-    def test_a_slow_repo_with_no_first_timers_is_still_a_trap(self):
-        """The gate must not become a blanket excuse. Full coverage, zero cold merges,
-        still damning."""
-        merged = [merged_pr("MEMBER", days_ago=i * 4) for i in range(40)]
-        health = metrics.build_health(
-            overview(merged),
-            issues_payload([]),
-            stale_payload(),
-            now=NOW,
-            merged_requested=100,
-            issues_requested=60,
-            **WINDOW,
-        )
-        assert not health.merged_coverage.partial
+    def test_a_deeply_sampled_repo_with_no_newcomers_is_still_a_trap(self):
+        """The refusal must not become a blanket excuse. Enough merges over enough
+        months with nobody new is still damning, and the interval says so."""
+        health = build(overview(merge_history(days=150, per_day=3)))
+        assert health.newness_sufficient
+        assert health.newness.upper < metrics.CLOSED_SHOP_CEILING
         assert metrics.verdict(health)[0] == metrics.TRAP
+
+
+class TestNewnessIsDerivedNotBorrowed:
+    """authorAssociation describes how someone is associated *now*, so a contributor who
+    broke in six months ago reads as an established CONTRIBUTOR today and their first
+    merge vanishes from any historical window. Deriving newness from author logins is
+    immune to that, and comparing the two is the cheapest test of whether the field can
+    be trusted about the past."""
+
+    def test_newness_is_found_even_when_association_says_nobody_is_new(self):
+        # Every row claims CONTRIBUTOR - exactly what a read-time association looks like.
+        health = build(overview(merge_history(days=120, per_day=5, new_every=5)))
+        assert health.cold_merges == 0
+        assert health.newness.successes > 0
+        assert health.association_disagrees
+
+    def test_the_disagreement_is_reported_in_the_verdict(self):
+        health = build(overview(merge_history(days=120, per_day=5, new_every=5)))
+        assert any("describes today" in r for r in metrics.verdict(health)[1])
+
+    def test_burn_in_stops_veterans_being_counted_as_new(self):
+        """Everyone appears for the first time at some point in the sample. Without a
+        burn-in the first sighting of a ten-year maintainer reads as a newcomer."""
+        health = build(overview(merge_history(days=120, per_day=5, new_every=0)))
+        assert health.newness.successes == 0
+
+    def test_a_sample_too_short_for_a_burn_in_refuses(self):
+        health = build(overview(merge_history(days=3, per_day=100, new_every=5)))
+        assert not health.newness_sufficient
+        assert "burn-in" in health.newness_note
+
+    def test_a_sample_too_small_refuses_before_it_even_tries(self):
+        health = build(overview(merge_history(days=60, per_day=1, new_every=5)))
+        assert not health.newness_sufficient
+        assert "baseline" in health.newness_note
+
+    def test_bot_merges_never_count_as_newcomers(self):
+        """Every bot login is new the first time it appears, and it is not a person."""
+        health = build(overview(merge_history(days=120, per_day=4, bot_every=4)))
+        assert health.bots_excluded > 0
+        assert health.newness.successes == 0
+
+
+class TestVerdictReadsTheInterval:
+    def test_the_same_rate_at_two_sample_sizes_gives_different_verdicts(self):
+        """8% of 25 and 8% of 600 are the same number and not the same evidence."""
+        small = build(overview(merge_history(days=90, per_day=1, new_every=12)))
+        large = build(overview(merge_history(days=150, per_day=8, new_every=12)))
+        assert metrics.verdict(large)[0] == metrics.GOOD
+        assert metrics.verdict(small)[0] != metrics.GOOD
+
+    def test_a_wide_interval_refuses_rather_than_guessing(self):
+        """21 of 64 is 33%, which looks excellent, but the interval runs 23% to 45%.
+        Enough data to compute a number, not enough to stand behind one."""
+        health = build(overview(merge_history(days=80, per_day=1, new_every=3)))
+        assert health.newness_sufficient
+        assert health.newness.undetermined
+        assert metrics.verdict(health)[0] == metrics.THIN
+
+    def test_ranking_breaks_ties_by_confidence_not_by_midpoint(self):
+        """Identical point estimates, different sample sizes. The one that is actually
+        settled has the higher lower bound, and must rank first."""
+        small = build(overview(merge_history(days=90, per_day=1, new_every=12)))
+        large = build(overview(merge_history(days=150, per_day=8, new_every=12)))
+        assert small.newness.point == pytest.approx(large.newness.point, abs=0.001)
+        assert large.newness.lower > small.newness.lower
+        assert metrics.rank([small, large])[0] is large

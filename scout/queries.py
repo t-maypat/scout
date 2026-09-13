@@ -36,7 +36,7 @@ query Overview($owner: String!, $name: String!, $prs: Int!, $after: String) {
         authorAssociation
         additions
         deletions
-        author { login }
+        author { __typename login }
       }
     }
   }

@@ -137,5 +137,8 @@ def probe(
         merged_requested=settings.merged_pr_sample * merged_pages,
         issues_requested=settings.issue_sample * issue_pages,
         unanswered_after_hours=settings.unanswered_after_hours,
+        newness_burn_in_days=settings.newness_burn_in_days,
+        newness_min_burn_in_merges=settings.newness_min_burn_in_merges,
+        newness_min_scored_merges=settings.newness_min_scored_merges,
         now=now,
     )

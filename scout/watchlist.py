@@ -42,6 +42,8 @@ class WatchedRepo(BaseModel):
     verdict_reasons: list[str] = Field(default_factory=list)
     outsider_merge_rate: float | None = None
     cold_merges: int | None = None
+    newness_point: float | None = None
+    newness_lower: float | None = None
     maintainer_utc_offset: float | None = None
 
     @property
