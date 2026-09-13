@@ -214,8 +214,10 @@ class TestResponsiveness:
 
     def test_mostly_ignored_repo_is_a_trap(self):
         nodes = [issue("NONE", days_ago=i) for i in range(1, 13)]
+        # Too few merges to say anything about newcomers, so silence is the only
+        # evidence there is - and it convicts.
         nodes = [issue("NONE", days_ago=20 + i) for i in range(20)]
-        health = build(overview(merge_history(days=120, new_every=5)), issues_payload(nodes))
+        health = build(overview(merge_history(days=60, per_day=1)), issues_payload(nodes))
         label, reasons = metrics.verdict(health)
         assert label == metrics.TRAP
         assert any("go unanswered" in r for r in reasons)
@@ -509,7 +511,7 @@ class TestFastRepoIsNotATrap:
     def test_genuinely_old_silence_still_counts(self):
         nodes = [issue("NONE", days_ago=20 + i) for i in range(24)]
         health = metrics.build_health(
-            overview(merge_history(days=120, new_every=5)),
+            overview(merge_history(days=60, per_day=1)),
             issues_payload(nodes),
             stale_payload(),
             now=NOW,
@@ -595,3 +597,59 @@ class TestVerdictReadsTheInterval:
         assert small.newness.point == pytest.approx(large.newness.point, abs=0.001)
         assert large.newness.lower > small.newness.lower
         assert metrics.rank([small, large])[0] is large
+
+
+class TestMergesOutweighSilence:
+    """Found on BerriAI/litellm: 5.7% of merges were somebody's first, merged in a median
+    of six hours, and it scored TRAP because 1152 of 1152 outsider issues went
+    unanswered.
+
+    Those measure different things. Issue silence says the maintainers are not talking;
+    merged pull requests from newcomers say patches land anyway. Scout's question is
+    whether a patch lands, so when the two disagree the merges decide it - and the
+    silence becomes advice about how to approach the project.
+    """
+
+    def ignored_but_merging(self, new_every: int):
+        nodes = [issue("NONE", days_ago=20 + i) for i in range(30)]
+        return build(
+            overview(merge_history(days=120, per_day=5, new_every=new_every)),
+            issues_payload(nodes),
+        )
+
+    def test_a_repo_that_merges_newcomers_is_not_a_trap_for_ignoring_issues(self):
+        health = self.ignored_but_merging(new_every=5)
+        assert health.unanswered_rate.lower > metrics.IGNORED_FLOOR
+        assert metrics.verdict(health)[0] != metrics.TRAP
+
+    def test_the_silence_becomes_advice_instead(self):
+        label, reasons = metrics.verdict(self.ignored_but_merging(new_every=5))
+        assert label == metrics.VIABLE
+        assert any("send code rather than questions" in r for r in reasons)
+
+    def test_silence_still_convicts_when_newcomers_do_not_land(self):
+        health = self.ignored_but_merging(new_every=0)
+        label, reasons = metrics.verdict(health)
+        assert label == metrics.TRAP
+        assert any("go unanswered" in r for r in reasons)
+
+
+class TestMissingCommentsAreVisible:
+    """Zero maintainer comments across a thousand issues is far more likely to mean the
+    comments were not fetched than that nobody ever replied. The card has to be able to
+    say which, or an unreadable verdict looks like a fact about the project."""
+
+    def test_an_empty_comment_sample_is_called_out(self):
+        nodes = [issue("NONE", days_ago=20 + i, comments=[]) for i in range(30)]
+        health = build(overview(merge_history(days=60, per_day=1)), issues_payload(nodes))
+        assert health.maintainer_comments_seen == 0
+        assert any("not fetched" in r for r in metrics.verdict(health)[1])
+
+    def test_a_populated_comment_sample_says_nothing(self):
+        nodes = [
+            issue("NONE", days_ago=20 + i, comments=[comment("MEMBER", 19 + i)])
+            for i in range(30)
+        ]
+        health = build(overview(merge_history(days=60, per_day=1)), issues_payload(nodes))
+        assert health.maintainer_comments_seen == 30
+        assert not any("not fetched" in r for r in metrics.verdict(health)[1])

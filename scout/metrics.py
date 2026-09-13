@@ -195,6 +195,10 @@ class RepoHealth:
     outsider_issues: int
     median_hours_to_maintainer_reply: float | None
     unanswered_outsider_issues: int
+    # How many maintainer comments the sample contained at all. Without it, "every
+    # outsider issue went unanswered" cannot be told apart from "no comment data came
+    # back", and those call for completely different responses.
+    maintainer_comments_seen: int
 
     beginner_contest_minutes: float | None
     beginner_issues_sampled: int
@@ -402,6 +406,7 @@ def _issue_metrics(
                 contest_minutes.append(_hours_between(created, claim) * 60)
 
     return {
+        "maintainer_comments_seen": len(maintainer_hours),
         "outsider_issues": outsider_issues,
         "median_hours_to_maintainer_reply": (
             statistics.median(reply_hours) if reply_hours else None
@@ -623,7 +628,15 @@ def verdict(health: RepoHealth) -> tuple[str, list[str]]:
         fatal.append(
             f"at best {health.outsider_merge_rate.upper:.0%} of merges come from outside"
         )
-    if unanswered.total >= 10 and unanswered.lower > IGNORED_FLOOR:
+    # Issue silence is evidence that a project is absent. Merged pull requests from
+    # newcomers are evidence that it is not, and they answer the question scout actually
+    # asks - will my patch land - far more directly. When the two disagree, the merges
+    # win and the silence becomes advice rather than a conviction.
+    merges_newcomers = (
+        health.newness_sufficient and health.newness.lower > CLOSED_SHOP_CEILING
+    )
+    ignored = unanswered.total >= 10 and unanswered.lower > IGNORED_FLOOR
+    if ignored and not merges_newcomers:
         fatal.append(
             f"at least {unanswered.lower:.0%} of outsider issues go unanswered "
             f"({unanswered.successes}/{unanswered.total})"
@@ -648,6 +661,11 @@ def verdict(health: RepoHealth) -> tuple[str, list[str]]:
         ]
 
     warn: list[str] = []
+    if ignored:
+        warn.append(
+            f"{unanswered.successes}/{unanswered.total} outsider issues went unanswered, "
+            "but pull requests do get merged - send code rather than questions"
+        )
     if (reply := health.median_hours_to_maintainer_reply) is not None and reply > 336:
         warn.append(f"median {reply / 24:.0f} days to first maintainer reply")
     if (contest := health.beginner_contest_minutes) is not None and contest < 60:
@@ -674,6 +692,11 @@ def _notes(health: RepoHealth) -> list[str]:
         )
     if health.bots_excluded:
         notes.append(f"{health.bots_excluded} bot merges excluded")
+    if health.outsider_issues >= 20 and health.maintainer_comments_seen == 0:
+        notes.append(
+            "no maintainer comment appeared anywhere in the issue sample, which usually "
+            "means the comments were not fetched rather than never written"
+        )
     return notes
 
 
