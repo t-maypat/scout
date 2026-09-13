@@ -18,6 +18,11 @@ from scout.safety import assert_budget, assert_read_only
 GRAPHQL_URL = "https://api.github.com/graphql"
 REST_URL = "https://api.github.com"
 
+# `retry-after` is a header GitHub chooses, so honouring it literally hands an unbounded
+# sleep to a remote server. Cap it: a caller that cannot wait this long should fail and
+# be retried by whatever scheduled it, not block a browser request for minutes.
+MAX_RETRY_SLEEP = 20.0
+
 
 class GitHubError(RuntimeError):
     """Any failure that is not worth retrying."""
@@ -25,6 +30,10 @@ class GitHubError(RuntimeError):
 
 class NotFound(GitHubError):
     pass
+
+
+class Timeout(GitHubError):
+    """The whole operation ran out of wall-clock, not one request."""
 
 
 class RateLimited(GitHubError):
@@ -52,12 +61,21 @@ class GitHubClient:
         token: str | None = None,
         timeout: float | None = None,
         read_only: bool = True,
+        deadline_seconds: float | None = None,
     ) -> None:
         settings = get_settings()
         # Read-only by default and everywhere in this phase. Turning it off is a
         # deliberate, greppable act, not something a refactor can do by accident.
         self.read_only = read_only
         self.rate_limit_floor = settings.rate_limit_floor
+        # A per-request timeout bounds one request. Without a deadline over the whole
+        # operation, a probe is nine requests each able to retry four times with sleeps
+        # in between - three quarters of an hour in the worst case, with whatever called
+        # it still waiting. The deadline is what makes "it hung" impossible.
+        self.deadline_seconds = deadline_seconds
+        self._deadline = (
+            time.monotonic() + deadline_seconds if deadline_seconds else None
+        )
         self.token = token or settings.github_token
         if not self.token:
             raise GitHubError("no token - set SCOUT_GITHUB_TOKEN in .env")
@@ -85,22 +103,48 @@ class GitHubClient:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    def _remaining(self) -> float | None:
+        if self._deadline is None:
+            return None
+        return self._deadline - time.monotonic()
+
+    def _check_deadline(self, what: str) -> None:
+        left = self._remaining()
+        if left is not None and left <= 0:
+            raise Timeout(
+                f"gave up after {self.deadline_seconds:.0f}s while {what}. "
+                "Nothing was written; try again, or raise the deadline."
+            )
+
+    def _sleep(self, seconds: float, what: str) -> None:
+        """Wait, but never past the deadline - and never on the wrong side of it."""
+        left = self._remaining()
+        if left is not None:
+            if left <= 0:
+                self._check_deadline(what)
+            seconds = min(seconds, left)
+        if seconds > 0:
+            time.sleep(seconds)
+
     def graphql(self, query: str, **variables: Any) -> dict[str, Any]:
         """Run one GraphQL query. Retries transient 5xx and secondary rate limits."""
         payload = {"query": query, "variables": variables}
         if self.read_only:
             assert_read_only("POST", GRAPHQL_URL, query)
         for attempt in range(4):
+            self._check_deadline("querying GitHub")
             response = self._client.post(GRAPHQL_URL, json=payload)
 
             if response.status_code in (502, 503, 504):
-                time.sleep(2**attempt)
+                self._sleep(2**attempt, "waiting out a GitHub error")
                 continue
             if response.status_code == 403:
-                retry_after = float(response.headers.get("retry-after", 60))
+                retry_after = min(
+                    float(response.headers.get("retry-after", 60)), MAX_RETRY_SLEEP
+                )
                 if attempt == 3:
                     raise RateLimited(retry_after)
-                time.sleep(retry_after)
+                self._sleep(retry_after, "waiting out a rate limit")
                 continue
             if response.status_code == 401:
                 raise GitHubError("token rejected - check SCOUT_GITHUB_TOKEN")
@@ -148,17 +192,20 @@ class GitHubClient:
         """
         headers = {"If-None-Match": etag} if etag else {}
         for attempt in range(4):
+            self._check_deadline("polling GitHub")
             response = self._client.get(f"{REST_URL}{path}", headers=headers)
             self.rest_requests += 1
 
             if response.status_code in (502, 503, 504):
-                time.sleep(2**attempt)
+                self._sleep(2**attempt, "waiting out a GitHub error")
                 continue
             if response.status_code == 403 and "rate limit" in response.text.lower():
-                retry_after = float(response.headers.get("retry-after", 60))
+                retry_after = min(
+                    float(response.headers.get("retry-after", 60)), MAX_RETRY_SLEEP
+                )
                 if attempt == 3:
                     raise RateLimited(retry_after)
-                time.sleep(retry_after)
+                self._sleep(retry_after, "waiting out a rate limit")
                 continue
             if response.status_code == 401:
                 raise GitHubError("token rejected - check SCOUT_GITHUB_TOKEN")

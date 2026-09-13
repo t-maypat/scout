@@ -11,22 +11,27 @@ as a cron job, arguably more so, because it is easy to click twice.
 
 from __future__ import annotations
 
+import html
+import logging
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from scout import cursors, derive, metrics, notify, watchlist
 from scout.config import get_settings
 from scout.events import PROBE_COMPLETED, Event, EventLog
-from scout.github import GitHubClient, GitHubError, NotFound
+from scout.github import GitHubClient, GitHubError, NotFound, RateLimited, Timeout
 from scout.poll import poll_all
 from scout.probe import probe as run_probe
 from scout.safety import SafetyError, assert_enabled, assert_repo_cap
+
+log = logging.getLogger("scout.server")
 
 STATIC = Path(__file__).parent / "static"
 
@@ -51,6 +56,32 @@ def _run_exclusive(work):
         return work()
     finally:
         _job_lock.release()
+
+
+def _as_http_error(exc: Exception, what: str) -> HTTPException:
+    """Turn anything a network call can raise into an answer the page can show.
+
+    A 500 tells the person at the browser nothing and leaves them guessing whether they
+    broke it. Every failure here has a cause worth naming - the token, the network,
+    GitHub being down - so name it. The traceback still goes to the server log.
+    """
+    if isinstance(exc, HTTPException):
+        return exc
+    if isinstance(exc, NotFound):
+        return HTTPException(404, "No such repository, or it is private.")
+    if isinstance(exc, Timeout):
+        return HTTPException(504, str(exc))
+    if isinstance(exc, RateLimited):
+        return HTTPException(429, "GitHub is rate limiting this token. It resets hourly.")
+    if isinstance(exc, GitHubError | SafetyError | ValueError):
+        return HTTPException(400, str(exc))
+    if isinstance(exc, httpx.TimeoutException):
+        return HTTPException(504, f"GitHub did not answer in time while {what}.")
+    if isinstance(exc, httpx.HTTPError):
+        return HTTPException(502, f"Could not reach GitHub while {what}: {exc}")
+    # Anything left is a bug in scout, not a bad request. Log it in full and say so.
+    log.exception("unhandled error while %s", what)
+    return HTTPException(500, f"scout hit a bug while {what}: {type(exc).__name__}: {exc}")
 
 
 # Plain-English explanations, served to the page so every number can say what it means.
@@ -173,6 +204,22 @@ class IntentRequest(BaseModel):
     action: str
 
 
+DOCS_SHELL = """<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>scout - documentation</title>
+<style>
+ body{{margin:0;background:#e9edef;color:#1b2733;
+   font:400 15px/1.6 "IBM Plex Sans",system-ui,sans-serif}}
+ header{{background:#fcfdfd;border-bottom:1px solid #c6d1d8;padding:1rem 1.5rem}}
+ header a{{color:#607281;text-decoration:none;border-bottom:1px solid #c6d1d8}}
+ pre{{max-width:54rem;margin:2.5rem auto;padding:0 1.5rem 4rem;white-space:pre-wrap;
+   word-wrap:break-word;font:400 13.5px/1.65 "IBM Plex Mono",ui-monospace,monospace}}
+</style>
+<header><a href="/">&larr; Back to scout</a></header>
+<pre>{body}</pre>
+"""
+
+
 def _proportion(p: Any) -> dict[str, Any]:
     return {
         "point": p.point,
@@ -223,6 +270,19 @@ def create_app() -> FastAPI:
     @app.get("/")
     def index() -> FileResponse:
         return FileResponse(STATIC / "index.html")
+
+    @app.get("/docs")
+    def docs() -> HTMLResponse:
+        """Serve the documentation from disk, so it is the same file git tracks.
+
+        Rendered as plain markdown in a <pre> rather than pulling in a renderer - the
+        dashboard has no build step and is not going to grow one for this.
+        """
+        source = Path(__file__).resolve().parent.parent / "docs" / "DOCUMENTATION.md"
+        if not source.exists():
+            raise HTTPException(404, "docs/DOCUMENTATION.md is not in this checkout")
+        body = source.read_text(encoding="utf-8")
+        return HTMLResponse(DOCS_SHELL.format(body=html.escape(body)))
 
     @app.get("/api/glossary")
     def glossary() -> dict[str, Any]:
@@ -347,13 +407,13 @@ def create_app() -> FastAPI:
             except SafetyError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             try:
-                with GitHubClient() as client:
+                with GitHubClient(
+                    deadline_seconds=settings.probe_deadline_seconds
+                ) as client:
                     health = run_probe(client, request.repo, max_pages=settings.probe_pages)
                     spent = client.points_spent
-            except NotFound as exc:
-                raise HTTPException(404, f"No such repository: {request.repo}") from exc
-            except (GitHubError, SafetyError, ValueError) as exc:
-                raise HTTPException(400, str(exc)) from exc
+            except Exception as exc:
+                raise _as_http_error(exc, f"probing {request.repo}") from exc
 
             book = watchlist.load()
             existing = book.find(health.full_name)
@@ -382,8 +442,11 @@ def create_app() -> FastAPI:
 
             marks = cursors.load()
             fresh, unchanged, errors = [], 0, []
+            free = 0
             try:
-                with GitHubClient() as client:
+                with GitHubClient(
+                    deadline_seconds=settings.poll_deadline_seconds
+                ) as client:
                     for result in poll_all(
                         client, [t.full_name for t in targets], marks, settings.poll_per_page
                     ):
@@ -394,8 +457,12 @@ def create_app() -> FastAPI:
                         else:
                             fresh.extend(result.events)
                     free = client.rest_not_modified
-            except SafetyError as exc:
-                raise HTTPException(status_code=429, detail=str(exc)) from exc
+            except Exception as exc:
+                # Whatever was fetched before the failure is still worth keeping, so the
+                # log is written below either way rather than thrown away.
+                if not fresh:
+                    raise _as_http_error(exc, "checking for changes") from exc
+                errors.append(str(exc))
 
             written = _log().append(fresh)
             cursors.save(marks)

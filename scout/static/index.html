@@ -42,6 +42,8 @@ button{font:inherit;color:inherit;cursor:pointer}
 .views button{background:none;border:0;padding:0 0 0.2rem;border-bottom:2px solid transparent;color:var(--muted)}
 .views button[aria-current="true"]{color:var(--ink);border-bottom-color:var(--ink);font-weight:450}
 .bar .right{margin-left:auto;display:flex;align-items:baseline;gap:1rem;color:var(--muted);font-size:0.875rem}
+.docslink{color:var(--muted);text-decoration:none;border-bottom:1px solid var(--rule)}
+.docslink:hover{color:var(--ink);border-bottom-color:var(--ink)}
 .act{
   background:var(--surface);border:1px solid var(--rule);border-radius:3px;
   padding:0.3rem 0.7rem;font-size:0.875rem;
@@ -144,6 +146,7 @@ h2{font-size:var(--step-1);font-weight:600;margin:2.5rem 0 0.75rem;letter-spacin
     <button role="tab" data-view="watchlist">Watchlist</button>
   </div>
   <div class="right">
+    <a href="/docs" target="_blank" rel="noopener" class="docslink">Docs</a>
     <span id="pollstate">reading the log</span>
     <button class="act" id="poll">Check for changes</button>
   </div>
@@ -165,6 +168,15 @@ const el = (t, a = {}, kids = []) => {
 const VERDICT = {DEAD:"var(--dead)", TRAP:"var(--trap)", THIN:"var(--thin)",
                  VIABLE:"var(--viable)", GOOD:"var(--good)"};
 const SAYS = {DEAD:"Dead", TRAP:"Trap", THIN:"Can't tell yet", VIABLE:"Viable", GOOD:"Good"};
+// What each stage in the funnel actually means. Shown on hover and under the picker,
+// because "building" and "candidate" do not explain themselves.
+const STATUS = {
+  candidate: "Worth a look, but you have not built it yet. Not watched.",
+  building: "You are working out how to build it. Not watched yet.",
+  green: "Its test suite passes on your machine. Watched for new work.",
+  active: "You have landed something here. Watched, and the relationship is started.",
+  rejected: "Ruled out. Kept on the list so scout does not suggest it again.",
+};
 // Kinds, not quality. An abandoned pull request is often the most valuable thing here -
 // eighty per cent finished - so it must not be drawn in the colour that means "dead".
 const KIND = {unassigned:"var(--good)", "abandoned-pr":"var(--viable)",
@@ -179,11 +191,27 @@ const HEADLINE = {unassigned:"just came free", "abandoned-pr":"half-finished, au
 
 let glossary = {}, state = {view:"inbox", repo:null};
 
-async function api(path, opts) {
-  const res = await fetch(path, opts);
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.detail || `Request failed (${res.status})`);
-  return body;
+// Above the server's own deadlines (90s probe, 180s poll) so its readable message wins
+// the race. This is the backstop for the server being wedged, not for a slow GitHub.
+const CLIENT_TIMEOUT_MS = 210000;
+
+async function api(path, opts = {}) {
+  const stop = AbortController ? new AbortController() : null;
+  const timer = stop && setTimeout(() => stop.abort(), CLIENT_TIMEOUT_MS);
+  try {
+    const res = await fetch(path, {...opts, signal: stop?.signal});
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `Request failed (${res.status})`);
+    return body;
+  } catch (err) {
+    if (err.name === "AbortError")
+      throw new Error("scout stopped responding. Check the terminal it is running in.");
+    if (err instanceof TypeError)
+      throw new Error("Lost the connection to scout. Is it still running?");
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 function flash(message, bad) {
   $(".flash")?.remove();
@@ -418,15 +446,18 @@ async function renderDetail(full) {
   const picker = el("div", {class:"measure", style:"grid-template-columns:auto 1fr;max-width:30rem"});
   const select = el("select", {"aria-label":"Status",
     style:"padding:0.45rem 0.6rem;border:1px solid var(--rule);border-radius:3px;background:var(--surface);font:inherit"});
-  for (const s of ["candidate","building","green","active","rejected"])
-    select.append(el("option", {value:s, selected: detail.entry?.status === s ? "selected" : null, text:s}));
+  for (const s of Object.keys(STATUS))
+    select.append(el("option", {value:s, title:STATUS[s],
+      selected: detail.entry?.status === s ? "selected" : null, text:s}));
+  const meaning = el("span", {class:"read", style:"white-space:normal",
+    text:STATUS[detail.entry?.status || "candidate"]});
   select.addEventListener("change", async () => {
+    meaning.textContent = STATUS[select.value];
     await api("/api/mark", {method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify({repo:full, status:select.value})});
     flash(`${full} is now ${select.value}`);
   });
-  picker.append(select, el("span", {class:"read",
-    text:"Only green and active repositories are watched for new work."}));
+  picker.append(select, meaning);
   frag.append(picker);
   main.replaceChildren(frag);
 

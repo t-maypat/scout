@@ -58,7 +58,13 @@ class Settings(BaseSettings):
     digest_hour_local: int = 20
     digest_max_items: int = 8
 
+    # Per request. Bounds one call, not the operation.
     timeout_seconds: float = 30.0
+    # Whole-operation ceilings. A probe is up to nine requests and a poll one per repo,
+    # so without these a single retry storm can block a caller for the better part of an
+    # hour. Reached from the dashboard these become a 504 with a readable message.
+    probe_deadline_seconds: float = 90.0
+    poll_deadline_seconds: float = 180.0
     watchlist_path: str = "./watchlist.toml"
     state_dir: str = "./state"
     events_dir: str = "./events"

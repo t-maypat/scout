@@ -96,3 +96,52 @@ class TestClientIsReadOnlyByDefault:
             client.graphql("mutation { addComment(input: {}) { clientMutationId } }")
         client.close()
         get_settings.cache_clear()
+
+
+class TestDeadline:
+    """A per-request timeout bounds one request. Nine requests that each retry four
+    times with sleeps between can still block a caller for most of an hour, which is
+    what "the dashboard hung" actually means."""
+
+    def client(self, seconds):
+        from scout.config import get_settings
+        from scout.github import GitHubClient
+
+        get_settings.cache_clear()
+        return GitHubClient(token="ghp_test", deadline_seconds=seconds)
+
+    def test_an_expired_deadline_refuses_before_it_calls_out(self, monkeypatch):
+        from scout.github import Timeout
+
+        monkeypatch.setenv("SCOUT_GITHUB_TOKEN", "ghp_test")
+        c = self.client(0.01)
+        import time as clock
+
+        clock.sleep(0.05)
+        with pytest.raises(Timeout, match="gave up"):
+            c._check_deadline("querying GitHub")
+        c.close()
+
+    def test_sleeping_never_runs_past_the_deadline(self, monkeypatch):
+        monkeypatch.setenv("SCOUT_GITHUB_TOKEN", "ghp_test")
+        import time as clock
+
+        c = self.client(0.2)
+        started = clock.monotonic()
+        c._sleep(30, "waiting out a rate limit")
+        assert clock.monotonic() - started < 1.0, "a 30s sleep must be cut to the deadline"
+        c.close()
+
+    def test_retry_after_is_capped(self):
+        """`retry-after` is chosen by GitHub, so honouring it literally hands a remote
+        server an unbounded sleep."""
+        from scout.github import MAX_RETRY_SLEEP
+
+        assert MAX_RETRY_SLEEP <= 30
+
+    def test_no_deadline_means_no_limit(self, monkeypatch):
+        monkeypatch.setenv("SCOUT_GITHUB_TOKEN", "ghp_test")
+        c = self.client(None)
+        c._check_deadline("querying GitHub")
+        assert c._remaining() is None
+        c.close()
