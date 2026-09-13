@@ -1,6 +1,6 @@
 # scout watchlist. Hand-edited and committed - this is curated data, not config.
 # status: candidate | building | green | active | rejected
-# last written 2026-09-13T12:03:55+00:00
+# last written 2026-09-13T12:10:15+00:00
 
 [[repo]]
 full_name = "BerriAI/litellm"
@@ -10,7 +10,7 @@ poll = true
 setup = ""
 test = ""
 notes = ""
-last_probed = "2026-09-13T12:03:55.285387Z"
+last_probed = "2026-09-13T12:10:15.265159Z"
 verdict = "TRAP"
 verdict_reasons = [
     "at least 98% of outsider issues go unanswered (192/192)",

@@ -95,6 +95,11 @@ def _card(health: RepoHealth) -> Panel:
         f"median {_fmt_hours(health.median_hours_to_maintainer_reply)}, "
         f"{health.unanswered_outsider_issues}/{health.outsider_issues} never answered",
     )
+    table.add_row(
+        "",
+        f"[{'red' if health.maintainer_comments_seen == 0 else 'dim'}]"
+        f"{health.maintainer_comments_seen} maintainer comments seen in the sample[/]",
+    )
     contest = health.beginner_contest_minutes
     table.add_row(
         "beginner issue claimed in",

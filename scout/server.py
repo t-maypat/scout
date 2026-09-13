@@ -316,6 +316,7 @@ def _health_json(health: metrics.RepoHealth) -> dict[str, Any]:
         "median_days_to_merge": health.median_days_to_merge_outsider,
         "median_hours_to_reply": health.median_hours_to_maintainer_reply,
         "unanswered": _proportion(health.unanswered_rate),
+        "maintainer_comments_seen": health.maintainer_comments_seen,
         "contest_minutes": health.beginner_contest_minutes,
         "overlap": health.free_hour_overlap,
         "timezone_note": health.timezone_note,
