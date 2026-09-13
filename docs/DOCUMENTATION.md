@@ -269,6 +269,18 @@ ignores interactive components from those: *"Non-application-owned webhooks cann
 interactive components."* No amount of formatting gets buttons onto a hand-made webhook's
 messages. The bot has to post them.
 
+**Install it to a server, not to your account.** Discord apps have two installation
+contexts, and the portal's *Discord Provided Link* offers whichever are enabled. If
+**User Install** is on, the link can produce a screen saying the app "wants to access your
+Discord account" with *Create commands* and *Send you direct messages* — and no server
+picker. That installs scout to you personally and it cannot post to a channel. Turn User
+Install off under **Installation → Installation Contexts**, leave **Guild Install** on, and
+set its default scope to `bot`. The correct screen says **Add to server** and asks which.
+
+A bot is always added to a whole server, never one channel. To confine it, give it no
+server-wide permissions at install and grant View Channel, Send Messages and Embed Links
+on `#scout` alone, as a channel permission override.
+
 Set `SCOUT_DISCORD_BOT_TOKEN` and `SCOUT_DISCORD_CHANNEL_ID` and scout posts as the bot
 instead, with an action row under each item. Leave them unset and it falls back to the
 webhook.
