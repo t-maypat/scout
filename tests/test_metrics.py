@@ -252,7 +252,7 @@ class TestContestedness:
         assert health.beginner_issues_sampled == 1
         assert health.beginner_contest_minutes == pytest.approx(20, abs=1)
 
-    def test_fast_claims_downgrade_a_healthy_repo_to_viable(self):
+    def test_fast_claims_are_advice_and_do_not_downgrade_the_verdict(self):
         merged = merge_history(days=120, per_day=5, new_every=5)
         nodes = [
             issue(
@@ -265,7 +265,9 @@ class TestContestedness:
         ]
         health = build(overview(merged), issues_payload(nodes))
         label, reasons = metrics.verdict(health)
-        assert label == metrics.VIABLE
+        # How contested the beginner issues are says nothing about whether a patch
+        # lands, and scout does not surface those issues anyway.
+        assert label == metrics.GOOD
         assert any("do not race" in r for r in reasons)
 
     def test_maintainer_comment_is_not_a_claim(self):
@@ -639,8 +641,10 @@ class TestMergesOutweighSilence:
         assert metrics.verdict(health)[0] != metrics.TRAP
 
     def test_the_silence_becomes_advice_instead(self):
+        """Design discussion often happens in Slack or Discord, so a quiet issue tracker
+        is not evidence of an absent project. It rides along with the verdict."""
         label, reasons = metrics.verdict(self.ignored_but_merging(new_every=5))
-        assert label == metrics.VIABLE
+        assert label == metrics.GOOD
         assert any("send code rather than questions" in r for r in reasons)
 
     def test_silence_still_convicts_when_newcomers_do_not_land(self):
@@ -766,3 +770,36 @@ class TestMaintainersComeFromMerges:
         }])
         health = build(overview(merged), issues_payload([]), stale)
         assert health.opportunities == []
+
+
+class TestGoodMeansOneThing:
+    """GOOD answers whether newcomers reliably get merged, and nothing else. Everything
+    true but unrelated - a silent tracker, an awkward timezone, contested beginner
+    issues - is printed alongside rather than used to withhold the verdict."""
+
+    def merging_well(self, **issue_kw):
+        merged = merge_history(days=120, per_day=5, new_every=5)
+        nodes = [issue("NONE", days_ago=20 + i, **issue_kw) for i in range(30)]
+        return build(overview(merged), issues_payload(nodes + maintainer_chatter()))
+
+    def test_an_awkward_timezone_does_not_withhold_good(self):
+        merged = merge_history(days=120, per_day=5, new_every=5)
+        nodes = [
+            issue("MEMBER", days_ago=10 + i, comments=[comment("MEMBER", 9 + i, hour=8)])
+            for i in range(12)
+        ]
+        health = build(overview(merged), issues_payload(nodes))
+        assert health.free_hour_overlap == 0.0
+        label, reasons = metrics.verdict(health)
+        assert label == metrics.GOOD
+        assert any("free hours" in r for r in reasons)
+
+    def test_the_reason_list_still_leads_with_the_merge_evidence(self):
+        label, reasons = metrics.verdict(self.merging_well())
+        assert label == metrics.GOOD
+        assert "someone's first" in reasons[0]
+
+    def test_a_repo_that_does_not_merge_newcomers_is_still_not_good(self):
+        merged = merge_history(days=150, per_day=3, new_every=0)
+        health = build(overview(merged), issues_payload(maintainer_chatter()))
+        assert metrics.verdict(health)[0] != metrics.GOOD

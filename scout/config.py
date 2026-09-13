@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # project's behaviour; these are the defaults every reported metric is measured over.
     # Pages the prober will walk before giving up on covering the window. One page is
     # one rate-limit point, so the default is cheap and raising it is not expensive.
+    # Whether a project is worth your time barely moves week to week, so refresh skips
+    # anything probed more recently than this. Polling is the recurring job; judging is
+    # not, and re-judging on every run spends budget to confirm what it already knows.
+    reprobe_after_days: int = 14
     probe_pages: int = 4
     merged_pr_sample: int = 100
     issue_sample: int = 60

@@ -18,6 +18,9 @@ from scout.events import parse_time
 
 class Cursor(BaseModel):
     etag: str | None = None
+    # The stalest-first pass has its own url, so its own ETag. It almost always comes
+    # back 304, because by definition nothing there is moving.
+    stale_etag: str | None = None
     watermark: datetime | None = None
     last_polled: datetime | None = None
     # Consecutive 304s. Useful for backing off repos that never change.

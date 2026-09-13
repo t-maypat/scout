@@ -24,6 +24,13 @@ from scout.probe import split_name
 # Stable URL on purpose. A moving `since=` would invalidate the ETag on every poll and
 # throw away the only free thing GitHub gives us.
 LISTING = "/repos/{owner}/{name}/issues?state=all&sort=updated&direction=desc&per_page={n}"
+# The other end of the same list. Sorting newest-first and walking toward a watermark can
+# never reach the oldest rows - and the oldest rows are the whole point, because an
+# abandoned pull request is one nothing has touched for ninety days. On a repository with
+# five thousand open items those sit thousands of rows beyond any page budget worth
+# spending. One request at the far end costs a rate-limit point the first time and 304s
+# after that, because by definition nothing there is moving.
+STALEST = "/repos/{owner}/{name}/issues?state=open&sort=updated&direction=asc&per_page={n}"
 MAX_PAGES = 5
 
 
@@ -33,6 +40,7 @@ class PollResult:
     events: list[Event]
     unchanged: bool = False
     pages: int = 0
+    stale_seen: int = 0
     error: str = ""
 
     @property
@@ -144,15 +152,48 @@ def poll_repo(
         if stop or len(items) < per_page:
             break
 
+    stale_events, stale_etag = _walk_stalest(
+        client, owner, name, cursor.stale_etag, per_page, full_name, now
+    )
+    events.extend(stale_events)
+
     return (
-        PollResult(full_name, events, pages=pages),
+        PollResult(full_name, events, pages=pages, stale_seen=len(stale_events)),
         Cursor(
             etag=etag,
+            stale_etag=stale_etag,
             watermark=newest(seen) or watermark,
             last_polled=now,
             quiet_polls=0,
         ),
     )
+
+
+def _walk_stalest(
+    client: GitHubClient,
+    owner: str,
+    name: str,
+    etag: str | None,
+    per_page: int,
+    full_name: str,
+    now: datetime,
+) -> tuple[list[Event], str | None]:
+    """One page from the far end of the list: the least recently touched open items.
+
+    No watermark and no paging. The stalest page is a standing view of what has been
+    abandoned, not a stream of changes, and re-observing the same rows is free - their
+    ids are identical, so the log dedupes them away.
+    """
+    path = STALEST.format(owner=owner, name=name, n=per_page)
+    try:
+        response = client.rest_conditional(path, etag)
+    except GitHubError:
+        # A failure here must not lose the main walk, which has already succeeded.
+        return [], etag
+    if response.unchanged:
+        return [], etag
+    items = response.body or []
+    return [to_event(item, full_name, observed_at=now) for item in items], response.etag
 
 
 def poll_all(

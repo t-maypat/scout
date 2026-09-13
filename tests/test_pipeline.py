@@ -164,9 +164,12 @@ class TestPolling:
         assert cursor.watermark == datetime.fromisoformat(iso(0.5).replace("Z", "+00:00"))
 
     def test_a_short_page_ends_the_walk(self):
+        """One request for the changes, then one for the stalest page."""
         client = FakeClient(pages=[[row(1)], [row(2)]])
         poll_repo(client, REPO, Cursor(), per_page=100, now=NOW)
-        assert len(client.calls) == 1
+        assert len(client.calls) == 2
+        assert "direction=desc" in client.calls[0][0]
+        assert "direction=asc" in client.calls[1][0]
 
 
 class TestDerivation:
@@ -363,4 +366,60 @@ class TestPollSideUsesTheSameMaintainerSet:
             number=99, pull=True, author="ishaan", association="NONE", updated=60, created=90
         )
         found = derive.opportunities(state, now=NOW, maintainers={"other/repo": ["ishaan"]})
+        assert [o.kind for o in found] == ["abandoned-pr"]
+
+
+class TestTheStalestPage:
+    """Sorting newest-first and walking toward a watermark can never reach the oldest
+    rows, and the oldest rows are the entire point - an abandoned pull request is one
+    nothing has touched for ninety days. On litellm those sit thousands of rows past any
+    page budget, so the inbox would never have shown a single one of them."""
+
+    def test_the_far_end_is_fetched_and_scoped_to_open_items(self):
+        client = FakeClient(pages=[[], [row(9, pull=True, updated=95, created=150)]])
+        result, cursor = poll_repo(client, REPO, Cursor(), now=NOW)
+        assert "direction=asc" in client.calls[1][0]
+        assert "state=open" in client.calls[1][0], "a stale closed item is not work"
+        assert result.stale_seen == 1
+        assert [e.subject for e in result.events] == ["9"]
+
+    def test_it_carries_its_own_etag(self):
+        """Different url, different ETag - and this one 304s almost every time, because
+        by definition nothing at that end is moving."""
+        client = FakeClient(pages=[[], [row(9)]])
+        _, cursor = poll_repo(client, REPO, Cursor(), now=NOW)
+        assert cursor.stale_etag and cursor.stale_etag != cursor.etag
+        poll_repo(client, REPO, cursor, now=NOW)
+        assert client.calls[-1][1] == cursor.stale_etag
+
+    def test_re_observing_the_same_stale_rows_writes_nothing(self, tmp_path):
+        """It is a standing view, not a stream, so it returns the same rows every time."""
+        client = FakeClient(pages=[[], [row(9, updated=95)]])
+        log = EventLog(tmp_path)
+        first, cursor = poll_repo(client, REPO, Cursor(), now=NOW)
+        assert len(log.append(first.events)) == 1
+        again, _ = poll_repo(client, REPO, Cursor(), now=NOW + timedelta(hours=2))
+        assert log.append(again.events) == []
+
+    def test_a_failure_at_the_far_end_does_not_lose_the_main_walk(self):
+        class HalfBroken(FakeClient):
+            def rest_conditional(self, path, etag=None):
+                if "direction=asc" in path:
+                    from scout.github import GitHubError
+
+                    raise GitHubError("boom")
+                return super().rest_conditional(path, etag)
+
+        client = HalfBroken(pages=[[row(1)]])
+        result, _ = poll_repo(client, REPO, Cursor(), now=NOW)
+        assert result.ok and [e.subject for e in result.events] == ["1"]
+
+    def test_an_abandoned_pr_from_the_far_end_reaches_the_inbox(self):
+        """End to end: the far-end row becomes an observation, derivation turns it into
+        an opportunity, and that is what the digest reads."""
+        client = FakeClient(pages=[[], [row(9, pull=True, association="CONTRIBUTOR",
+                                          author="wanderer", updated=95, created=150)]])
+        result, _ = poll_repo(client, REPO, Cursor(), now=NOW)
+        state = derive.derive(result.events)
+        found = derive.opportunities(state, now=NOW)
         assert [o.kind for o in found] == ["abandoned-pr"]
