@@ -199,6 +199,10 @@ class RepoHealth:
     # outsider issue went unanswered" cannot be told apart from "no comment data came
     # back", and those call for completely different responses.
     maintainer_comments_seen: int
+    # Every comment, whatever the association. Comments present with no maintainer among
+    # them means the association cannot identify them; no comments at all means they were
+    # never fetched. The two need different fixes, so the card has to tell them apart.
+    comments_seen: int
 
     beginner_contest_minutes: float | None
     beginner_issues_sampled: int
@@ -367,6 +371,7 @@ def _issue_metrics(
     contest_minutes: list[float] = []
     beginner_sampled = 0
     maintainer_hours: list[float] = []
+    comments_seen = 0
     used: list[dict[str, Any]] = []
 
     for node in nodes:
@@ -375,6 +380,7 @@ def _issue_metrics(
             continue
         used.append(node)
         comments = node.get("comments", {}).get("nodes") or []
+        comments_seen += len(comments)
 
         for comment in comments:
             if comment.get("authorAssociation") in MAINTAINER and (
@@ -406,6 +412,7 @@ def _issue_metrics(
                 contest_minutes.append(_hours_between(created, claim) * 60)
 
     return {
+        "comments_seen": comments_seen,
         "maintainer_comments_seen": len(maintainer_hours),
         "outsider_issues": outsider_issues,
         "median_hours_to_maintainer_reply": (
@@ -635,7 +642,10 @@ def verdict(health: RepoHealth) -> tuple[str, list[str]]:
     merges_newcomers = (
         health.newness_sufficient and health.newness.lower > CLOSED_SHOP_CEILING
     )
-    ignored = unanswered.total >= 10 and unanswered.lower > IGNORED_FLOOR
+    measurable = health.maintainer_comments_seen > 0
+    ignored = (
+        measurable and unanswered.total >= 10 and unanswered.lower > IGNORED_FLOOR
+    )
     if ignored and not merges_newcomers:
         fatal.append(
             f"at least {unanswered.lower:.0%} of outsider issues go unanswered "
@@ -693,10 +703,17 @@ def _notes(health: RepoHealth) -> list[str]:
     if health.bots_excluded:
         notes.append(f"{health.bots_excluded} bot merges excluded")
     if health.outsider_issues >= 20 and health.maintainer_comments_seen == 0:
-        notes.append(
-            "no maintainer comment appeared anywhere in the issue sample, which usually "
-            "means the comments were not fetched rather than never written"
-        )
+        if health.comments_seen:
+            notes.append(
+                f"{health.comments_seen} comments in the sample, none from a recognised "
+                "maintainer - authorAssociation cannot see private org membership, so "
+                "reply time is unmeasured here rather than bad"
+            )
+        else:
+            notes.append(
+                "no comments at all in the issue sample - they were not fetched, so "
+                "reply time is unmeasured"
+            )
     return notes
 
 
