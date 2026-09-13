@@ -274,8 +274,13 @@ contexts, and the portal's *Discord Provided Link* offers whichever are enabled.
 **User Install** is on, the link can produce a screen saying the app "wants to access your
 Discord account" with *Create commands* and *Send you direct messages* — and no server
 picker. That installs scout to you personally and it cannot post to a channel. Turn User
-Install off under **Installation → Installation Contexts**, leave **Guild Install** on, and
-set its default scope to `bot`. The correct screen says **Add to server** and asks which.
+Install off under **Installation → Installation Contexts** and leave **Guild Install** on.
+
+**Keep the bot private, and invite it with a generated URL.** With *Public Bot* turned off
+on the Bot tab, Discord refuses a default install link ("Private application cannot have a
+default authorization link"), so set **Installation → Install Link** to **None**. Then use
+**OAuth2 → URL Generator**: scope `bot`, integration type Guild Install, no permissions.
+Open the generated URL; the correct screen says **Add to server** and asks which.
 
 A bot is always added to a whole server, never one channel. To confine it, give it no
 server-wide permissions at install and grant View Channel, Send Messages and Embed Links
