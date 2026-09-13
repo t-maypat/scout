@@ -1,4 +1,4 @@
-"""The notifier: turn derived state into one Discord message.
+"""The notifier: turn derived state into Discord messages.
 
 A channel webhook needs no bot, no OAuth and no application - you create it in Discord's
 UI and POST JSON at it. That is the whole setup for notifications.
@@ -18,9 +18,10 @@ which is why the hot path is deliberately narrow.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -106,27 +107,7 @@ class Digest:
         header = self.to_discord()["embeds"][0]
         messages: list[dict[str, Any]] = [{"embeds": [header]}]
         for item in self.items[: MAX_EMBEDS - 1]:
-            age = f" - idle {item.idle_days}d" if item.idle_days else ""
-            messages.append(
-                {
-                    "embeds": [
-                        {
-                            "title": _clip(
-                                f"{item.repo}#{item.number} - {item.title}", MAX_TITLE
-                            ),
-                            "url": item.url,
-                            "description": _clip(
-                                f"*{HEADLINES.get(item.kind, item.kind)}*{age}"
-                                + chr(10)
-                                + item.note,
-                                MAX_DESCRIPTION,
-                            ),
-                            "color": COLOURS.get(item.kind, 0x99AAB5),
-                        }
-                    ],
-                    "components": [buttons_for(item)],
-                }
-            )
+            messages.append(item_message(item))
         return messages
 
     def to_discord(self) -> dict[str, Any]:
@@ -240,8 +221,8 @@ def buttons_for(item: Item) -> dict[str, Any]:
     """One row of actions for one item.
 
     Components attach to a message, not to an embed, so per-item buttons mean per-item
-    messages. That is why bot mode sends a header and then one message each rather than
-    a single digest - eight embeds in one message can only ever share one row.
+    messages. That is why bot mode posts one message per item, inside a thread, rather
+    than a single digest - eight embeds in one message can only ever share one row.
 
     The link button needs nothing listening: Discord opens the url itself. Only Later and
     Not for me reach the interaction receiver.
@@ -300,14 +281,168 @@ def post(
     response.raise_for_status()
 
 
+def item_message(item: Item) -> dict[str, Any]:
+    """One item as one message: its embed and its own row of buttons."""
+    age = f" - idle {item.idle_days}d" if item.idle_days else ""
+    return {
+        "embeds": [
+            {
+                "title": _clip(f"{item.repo}#{item.number} - {item.title}", MAX_TITLE),
+                "url": item.url,
+                "description": _clip(
+                    f"*{HEADLINES.get(item.kind, item.kind)}*{age}" + chr(10) + item.note,
+                    MAX_DESCRIPTION,
+                ),
+                "color": COLOURS.get(item.kind, 0x99AAB5),
+            }
+        ],
+        "components": [buttons_for(item)],
+    }
+
+
+def by_repo(items: Iterable[Item]) -> dict[str, list[Item]]:
+    """Items grouped by repository, repositories in the order of their best item.
+
+    The digest is already ranked, so the first repository here is the one holding the
+    single most actionable thing tonight, and each thread keeps its items in rank order.
+    """
+    groups: dict[str, list[Item]] = {}
+    for item in items:
+        groups.setdefault(item.repo, []).append(item)
+    return groups
+
+
+# A day, to match one thread per repository per day.
+THREAD_ARCHIVE_MINUTES = 1440
+THREAD_STATE_DAYS = 7
+
+Request = Callable[[str, str, dict[str, Any] | None], dict[str, Any]]
+
+
+def bot_request(token: str, timeout: float = 15.0) -> Request:
+    """Authenticated calls to Discord's API as the bot, with the failures named."""
+
+    def call(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        response = httpx.request(
+            method,
+            f"{API}{path}",
+            json=payload,
+            headers={"Authorization": f"Bot {token}"},
+            timeout=timeout,
+        )
+        if response.status_code == 429:
+            retry = response.json().get("retry_after", "?")
+            raise RuntimeError(f"discord rate limited, retry after {retry}s")
+        if response.status_code == 403:
+            raise RuntimeError(
+                "discord refused: on the scout channel the bot needs View Channel, Send "
+                "Messages, Embed Links, Create Public Threads and Send Messages in Threads"
+            )
+        response.raise_for_status()
+        return response.json() if response.content else {}
+
+    return call
+
+
+def _load_threads(path: Path) -> dict[str, dict[str, dict[str, Any]]]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _save_threads(path: Path, threads: dict[str, Any], today: date) -> None:
+    cutoff = (today - timedelta(days=THREAD_STATE_DAYS)).isoformat()
+    kept = {day: repos for day, repos in threads.items() if day >= cutoff}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(kept, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def send_threaded(
+    digest: Digest,
+    channel_id: str,
+    request: Request,
+    state_file: Path,
+    today: date,
+) -> int:
+    """One thread per repository per day, one message per item inside it.
+
+    The channel itself gets a single line per repository per day, so it reads as a
+    list of days and projects rather than a wall of items. A second send on the same
+    day adds to that repository's existing thread and updates the count on its header
+    instead of starting another. State is saved as soon as a thread exists, so a
+    failure halfway through the items cannot leave a second thread behind on retry.
+    """
+    label = today.strftime("%d %b")
+    threads = _load_threads(state_file)
+    todays = threads.setdefault(today.isoformat(), {})
+    sent = 0
+
+    for repo, items in by_repo(digest.items).items():
+        entry = todays.get(repo)
+        if entry is None:
+            header = request(
+                "POST",
+                f"/channels/{channel_id}/messages",
+                {"content": f"{label} - {repo} ({len(items)})"},
+            )
+            thread = request(
+                "POST",
+                f"/channels/{channel_id}/messages/{header['id']}/threads",
+                {
+                    "name": _clip(f"{label} - {repo}", 100),
+                    "auto_archive_duration": THREAD_ARCHIVE_MINUTES,
+                },
+            )
+            entry = {"thread": thread["id"], "header": header["id"], "count": 0}
+            todays[repo] = entry
+            sent += 1
+            _save_threads(state_file, threads, today)
+
+        for item in items:
+            request("POST", f"/channels/{entry['thread']}/messages", item_message(item))
+            sent += 1
+
+        entry["count"] = int(entry.get("count", 0)) + len(items)
+        if entry["count"] != len(items):
+            request(
+                "PATCH",
+                f"/channels/{channel_id}/messages/{entry['header']}",
+                {"content": f"{label} - {repo} ({entry['count']})"},
+            )
+        _save_threads(state_file, threads, today)
+
+    return sent
+
+
 def send(
     digest: Digest,
     webhook_url: str = "",
     bot_token: str = "",
     channel_id: str = "",
+    state_dir: str = "./state",
+    tz: str = "UTC",
 ) -> int:
-    """Deliver a digest. Returns how many messages went out."""
-    messages = digest.to_messages(with_buttons=bool(bot_token and channel_id))
-    for message in messages:
-        post(message, webhook_url, bot_token, channel_id)
-    return len(messages)
+    """Deliver a digest. Returns how many messages went out.
+
+    As the bot, a thread per repository per day. By webhook, one message: a plain webhook
+    can neither start a thread in a text channel nor carry buttons.
+    """
+    if bot_token and channel_id:
+        # The day is the reader's day, not UTC's - otherwise an evening digest in IST
+        # lands in yesterday's thread for the first five and a half hours of the date.
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            today = datetime.now(ZoneInfo(tz)).date()
+        except ZoneInfoNotFoundError:
+            today = datetime.now(UTC).date()
+        return send_threaded(
+            digest,
+            channel_id,
+            bot_request(bot_token),
+            Path(state_dir) / "discord_threads.json",
+            today,
+        )
+    post(digest.to_discord(), webhook_url)
+    return 1

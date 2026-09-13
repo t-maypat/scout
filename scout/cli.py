@@ -500,12 +500,14 @@ def digest(send: bool = typer.Option(False, "--send", help="POST it to Discord")
             webhook_url=settings.discord_webhook_url,
             bot_token=settings.discord_bot_token,
             channel_id=settings.discord_channel_id,
+            state_dir=settings.state_dir,
+            tz=settings.display_tz,
         )
     except (ValueError, RuntimeError) as exc:
         console.print(f"[red]{exc}[/]")
         raise typer.Exit(1) from exc
     log.append([notify.sent_event(built)])
-    how = "as the bot, with buttons" if settings.posts_as_bot else "by webhook"
+    how = "as the bot, in a thread per repo" if settings.posts_as_bot else "by webhook"
     console.print(f"[green]sent {len(built.items)} items {how}[/] ({messages} messages)")
 
 
@@ -632,7 +634,8 @@ def _check_discord_bot(settings) -> int:
     if channel.is_success:
         console.print(
             f"discord: bot [bold]{name}[/] can see "
-            f"#{channel.json().get('name', '?')} - digests post with buttons"
+            f"#{channel.json().get('name', '?')} - digests go to a thread per repo per day. "
+            "It also needs Create Public Threads and Send Messages in Threads there"
         )
         return 0
     console.print(f"discord: [red]unexpected {channel.status_code}[/] checking the channel")
