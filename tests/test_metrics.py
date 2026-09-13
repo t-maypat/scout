@@ -117,6 +117,19 @@ def comment(assoc: str, days_ago: float, hour: int | None = None) -> dict:
     return {"createdAt": ts(days_ago, hour), "authorAssociation": assoc, "author": {"login": "m"}}
 
 
+def maintainer_chatter(count: int = 6) -> list[dict]:
+    """Issues the maintainers did engage with.
+
+    Fixtures need these or the reply metric is unmeasurable - which is now a real state,
+    not an oversight: with no maintainer comment anywhere, scout cannot tell silence from
+    an association it could not read, and refuses to convict on either.
+    """
+    return [
+        issue("MEMBER", days_ago=10 + i, comments=[comment("MEMBER", 9 + i)])
+        for i in range(count)
+    ]
+
+
 def issues_payload(nodes: list[dict]) -> dict:
     return {"repository": {"issues": {"nodes": nodes}}}
 
@@ -216,7 +229,7 @@ class TestResponsiveness:
         nodes = [issue("NONE", days_ago=i) for i in range(1, 13)]
         # Too few merges to say anything about newcomers, so silence is the only
         # evidence there is - and it convicts.
-        nodes = [issue("NONE", days_ago=20 + i) for i in range(20)]
+        nodes = [issue("NONE", days_ago=20 + i) for i in range(20)] + maintainer_chatter()
         health = build(overview(merge_history(days=60, per_day=1)), issues_payload(nodes))
         label, reasons = metrics.verdict(health)
         assert label == metrics.TRAP
@@ -510,6 +523,7 @@ class TestFastRepoIsNotATrap:
 
     def test_genuinely_old_silence_still_counts(self):
         nodes = [issue("NONE", days_ago=20 + i) for i in range(24)]
+        nodes += maintainer_chatter()
         health = metrics.build_health(
             overview(merge_history(days=60, per_day=1)),
             issues_payload(nodes),
@@ -611,7 +625,7 @@ class TestMergesOutweighSilence:
     """
 
     def ignored_but_merging(self, new_every: int):
-        nodes = [issue("NONE", days_ago=20 + i) for i in range(30)]
+        nodes = [issue("NONE", days_ago=20 + i) for i in range(30)] + maintainer_chatter()
         return build(
             overview(merge_history(days=120, per_day=5, new_every=new_every)),
             issues_payload(nodes),
@@ -653,3 +667,37 @@ class TestMissingCommentsAreVisible:
         health = build(overview(merge_history(days=60, per_day=1)), issues_payload(nodes))
         assert health.maintainer_comments_seen == 30
         assert not any("not fetched" in r for r in metrics.verdict(health)[1])
+
+
+class TestUnmeasurableIsNotBad:
+    """BerriAI/litellm returned zero maintainer comments across 180 issues while merging
+    outsider pull requests in four hours. Maintainers that active are commenting; the
+    field simply was not identifying them - authorAssociation reports MEMBER only for
+    publicly visible org membership. A rule fed by a field that returned nothing must not
+    convict."""
+
+    def ignored_with_no_readable_maintainer(self):
+        nodes = [issue("NONE", days_ago=20 + i) for i in range(30)]
+        return build(overview(merge_history(days=60, per_day=1)), issues_payload(nodes))
+
+    def test_silence_does_not_convict_when_no_maintainer_is_identifiable(self):
+        health = self.ignored_with_no_readable_maintainer()
+        assert health.maintainer_comments_seen == 0
+        assert not any("go unanswered" in r for r in metrics.verdict(health)[1])
+
+    def test_comments_present_but_unattributable_says_so(self):
+        """Comments exist, none recognised as a maintainer: the association is the
+        problem, and the advice is different from a fetch failure."""
+        nodes = [
+            issue("NONE", days_ago=20 + i, comments=[comment("NONE", 19 + i)])
+            for i in range(30)
+        ]
+        health = build(overview(merge_history(days=60, per_day=1)), issues_payload(nodes))
+        assert health.comments_seen == 30
+        assert health.maintainer_comments_seen == 0
+        assert any("private org membership" in r for r in metrics.verdict(health)[1])
+
+    def test_no_comments_at_all_is_reported_as_a_fetch_problem(self):
+        health = self.ignored_with_no_readable_maintainer()
+        assert health.comments_seen == 0
+        assert any("not fetched" in r for r in metrics.verdict(health)[1])

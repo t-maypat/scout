@@ -98,7 +98,8 @@ def _card(health: RepoHealth) -> Panel:
     table.add_row(
         "",
         f"[{'red' if health.maintainer_comments_seen == 0 else 'dim'}]"
-        f"{health.maintainer_comments_seen} maintainer comments seen in the sample[/]",
+        f"{health.maintainer_comments_seen} from a maintainer, "
+        f"{health.comments_seen} comments seen in all[/]",
     )
     contest = health.beginner_contest_minutes
     table.add_row(
