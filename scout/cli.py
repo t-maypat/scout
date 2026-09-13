@@ -7,7 +7,7 @@ repositories are worth your time before any of that exists.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import typer
@@ -272,8 +272,16 @@ def refresh():
     is exactly the one no longer trusted. At four points a repo against five thousand an
     hour, there is nothing to save by skipping them.
     """
+    settings = get_settings()
     book = watchlist.load()
-    live = list(book.repo)
+    cutoff = datetime.now(UTC) - timedelta(days=settings.reprobe_after_days)
+    live = [r for r in book.repo if not r.last_probed or r.last_probed < cutoff]
+    skipped = len(book.repo) - len(live)
+    if skipped:
+        console.print(
+            f"[dim]{skipped} probed in the last {settings.reprobe_after_days} days, "
+            "left alone. `scout probe <repo>` to force one.[/]"
+        )
     if not live:
         console.print("[dim]nothing to refresh[/]")
         return
@@ -281,7 +289,7 @@ def refresh():
     with _client() as client:
         for entry in live:
             try:
-                health = run_probe(client, entry.full_name, max_pages=get_settings().probe_pages)
+                health = run_probe(client, entry.full_name, max_pages=settings.probe_pages)
             except GitHubError as exc:
                 console.print(f"[red]{entry.full_name}: {exc}[/]")
                 continue

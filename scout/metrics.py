@@ -721,26 +721,31 @@ def verdict(health: RepoHealth) -> tuple[str, list[str]]:
             *notes,
         ]
 
-    warn: list[str] = []
+    # GOOD answers one question: do newcomers reliably get merged. Everything below is
+    # true and worth saying, and none of it is evidence about that question - a project
+    # whose design discussion happens in Slack has a quiet issue tracker and merges
+    # strangers all day. So these ride along with the verdict instead of blocking it.
+    advice: list[str] = []
     if ignored:
-        warn.append(
+        advice.append(
             f"{unanswered.successes}/{unanswered.total} outsider issues went unanswered, "
             "but pull requests do get merged - send code rather than questions"
         )
     if (reply := health.median_hours_to_maintainer_reply) is not None and reply > 336:
-        warn.append(f"median {reply / 24:.0f} days to first maintainer reply")
+        advice.append(f"median {reply / 24:.0f} days to a first maintainer reply")
     if (contest := health.beginner_contest_minutes) is not None and contest < 60:
-        warn.append(f"beginner issues claimed in a median {contest:.0f} min - do not race")
+        advice.append(f"beginner issues claimed in a median {contest:.0f} min - do not race")
     if (overlap := health.free_hour_overlap) is not None and overlap < 0.05:
-        warn.append("maintainers are never active during your free hours")
+        advice.append("maintainers are never active during your free hours")
 
-    if newness.lower > OPEN_DOOR_FLOOR and not warn:
+    if newness.lower > OPEN_DOOR_FLOOR:
         return GOOD, [
             f"at least {newness.lower:.1%} of merges are someone's first "
             f"({newness.successes}/{newness.total} over {health.newness_scored_days:.0f}d)",
+            *advice,
             *notes,
         ]
-    return VIABLE, [*(warn or [f"first-timer share {newness.describe()}"]), *notes]
+    return VIABLE, [f"first-timer share {newness.describe()}", *advice, *notes]
 
 
 def _notes(health: RepoHealth) -> list[str]:
