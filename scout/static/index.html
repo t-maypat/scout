@@ -15,7 +15,7 @@
   --ground:#e9edef; --surface:#fcfdfd; --ink:#1b2733; --muted:#607281;
   --rule:#c6d1d8; --rule-soft:#dde5e9;
   --dead:#8a94a0; --trap:#b03a2b; --thin:#bd8420; --viable:#37788a; --good:#2c7a4b;
-  --report:#4b5a94;
+  --report:#4b5a94; --accent-step:#37788a;
   --focus:#37788a;
   --step-0:0.9375rem; --step-1:1.1719rem; --step-2:1.4648rem; --step-3:1.8311rem;
 }
@@ -37,7 +37,8 @@ button{font:inherit;color:inherit;cursor:pointer}
   padding:1rem 1.5rem;border-bottom:1px solid var(--rule);background:var(--surface);
   position:sticky;top:0;z-index:20;
 }
-.wordmark{font-weight:600;letter-spacing:-0.015em;font-size:var(--step-1);margin-right:0.25rem}
+.wordmark{font-weight:600;letter-spacing:-0.015em;font-size:var(--step-1);margin-right:0.25rem;
+  background:none;border:0;padding:0}
 .views{display:flex;gap:1.25rem}
 .views button{background:none;border:0;padding:0 0 0.2rem;border-bottom:2px solid transparent;color:var(--muted)}
 .views button[aria-current="true"]{color:var(--ink);border-bottom-color:var(--ink);font-weight:450}
@@ -83,12 +84,25 @@ h2{font-size:var(--step-1);font-weight:600;margin:2.5rem 0 0.75rem;letter-spacin
 .item .tools button{background:none;border:0;color:var(--muted);font-size:0.8125rem;padding:0.15rem 0;border-bottom:1px solid transparent}
 .item .tools button:hover{color:var(--ink);border-bottom-color:var(--rule)}
 
+/* ---- next step ---- */
+.nextstep{background:var(--surface);border-left:3px solid var(--accent-step);
+  padding:1rem 1.25rem;margin:0 0 2rem;border-radius:0 3px 3px 0;max-width:46rem}
+.nextstep .doit{margin:0;font-weight:450;font-size:var(--step-1);letter-spacing:-0.01em}
+.nextstep .whyit{margin:0.35rem 0 0;color:var(--muted);font-size:0.9375rem}
+.addrepo{display:grid;grid-template-columns:1fr auto;gap:0.625rem;max-width:34rem;
+  margin-bottom:2.5rem}
+.addrepo input{padding:0.5rem 0.7rem;border:1px solid var(--rule);border-radius:3px;
+  background:var(--surface);font:inherit;width:100%}
+.addrepo input:focus{border-color:var(--accent-step);outline:none}
+
 /* ---- funnel ---- */
 .funnel{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(11.5rem,1fr);
   gap:1rem;align-items:start;overflow-x:auto;padding-bottom:0.5rem}
 .col h3{margin:0 0 0.625rem;font-size:0.875rem;font-weight:450;color:var(--muted);
   padding-bottom:0.375rem;border-bottom:1px solid var(--rule)}
 .col h3 span{color:var(--ink);font-weight:600}
+.colnote{margin:0 0 0.75rem;font-size:0.8125rem;line-height:1.45;color:var(--muted)}
+.colempty{font-size:0.8125rem;color:var(--rule)}
 .repo{
   background:var(--surface);border:1px solid var(--rule-soft);border-radius:3px;
   padding:0.75rem 0.875rem;margin-bottom:0.625rem;width:100%;text-align:left;
@@ -140,10 +154,10 @@ h2{font-size:var(--step-1);font-weight:600;margin:2.5rem 0 0.75rem;letter-spacin
 </head>
 <body>
 <nav class="bar">
-  <span class="wordmark">scout</span>
+  <button class="wordmark" data-view="watchlist" aria-label="scout home">scout</button>
   <div class="views" role="tablist">
-    <button role="tab" data-view="inbox" aria-current="true">Inbox</button>
-    <button role="tab" data-view="watchlist">Watchlist</button>
+    <button role="tab" data-view="inbox">Inbox</button>
+    <button role="tab" data-view="watchlist" aria-current="true">Watchlist</button>
   </div>
   <div class="right">
     <a href="/docs" target="_blank" rel="noopener" class="docslink">Docs</a>
@@ -170,6 +184,13 @@ const VERDICT = {DEAD:"var(--dead)", TRAP:"var(--trap)", THIN:"var(--thin)",
 const SAYS = {DEAD:"Dead", TRAP:"Trap", THIN:"Can't tell yet", VIABLE:"Viable", GOOD:"Good"};
 // What each stage in the funnel actually means. Shown on hover and under the picker,
 // because "building" and "candidate" do not explain themselves.
+const COLUMN = {
+  candidate: "Worth a look. Not built yet, so not watched.",
+  building: "You are getting its tests to run.",
+  green: "Tests pass on your machine. Watched for new work.",
+  active: "You have landed something here.",
+  rejected: "Ruled out, and kept so it is not suggested again.",
+};
 const STATUS = {
   candidate: "Worth a look, but you have not built it yet. Not watched.",
   building: "You are working out how to build it. Not watched yet.",
@@ -189,7 +210,7 @@ const HEADLINE = {unassigned:"just came free", "abandoned-pr":"half-finished, au
                   "unanswered-report":"nobody has replied",
                   ready_for_review:"left draft"};
 
-let glossary = {}, state = {view:"inbox", repo:null};
+let glossary = {}, state = {view:"watchlist", repo:null};
 
 // Above the server's own deadlines (90s probe, 180s poll) so its readable message wins
 // the race. This is the backstop for the server being wedged, not for a slow GitHub.
@@ -300,19 +321,47 @@ async function renderInbox() {
 }
 
 /* ---------- watchlist ---------- */
+/* The next step, worked out from where you actually are. A dashboard that shows state
+   and leaves you to infer the action is the commonest way one goes unused. */
+function nextStep(repos) {
+  const by = s => repos.filter(r => r.status === s).length;
+  if (!repos.length)
+    return {do: "Add a project you already use.",
+            why: "Familiarity beats popularity. You will know when something is broken, and you will care enough to fix it."};
+  if (by("green") + by("active") === 0 && by("candidate") + by("building"))
+    return {do: `Build one of your ${by("candidate") + by("building")} candidates and mark it green.`,
+            why: "Nothing is watched until then. An alert about a project you cannot compile wastes the evening it arrives in."};
+  if (by("green") + by("active") === 0)
+    return {do: "Nothing has cleared yet. Try a project you already use.",
+            why: "Scout rejects repositories that do not merge patches from strangers, however popular they are."};
+  if (by("green") + by("active") < 3)
+    return {do: `${by("green") + by("active")} watched. Two or three more is about right.`,
+            why: "Depth beats breadth: maintainers hand work to names they recognise, and that takes a few merged patches in the same place."};
+  return {do: "Set up. New work turns up in the Inbox.",
+          why: "One digest in the evening, not a notification every time something moves."};
+}
+
 async function renderWatchlist() {
   const main = $("#main");
   main.replaceChildren(el("p", {class:"lede working", text:"Reading the watchlist…"}));
   const data = await api("/api/overview");
+  $("#pollstate").textContent = data.last_poll
+    ? `${data.polled_count} watched, checked ${ago(data.last_poll)}`
+    : `${data.polled_count} watched`;
 
   const frag = document.createDocumentFragment();
   frag.append(el("h1", {text:"Watchlist"}));
   frag.append(el("p", {class:"lede", text:
-    `${data.polled_count} of ${data.repos.length} are built and watched. Five you can build beat fifty you cannot — a repository you cannot get to a passing test suite is one you will never touch on a weeknight.`}));
+    "Scout answers one question about a project: will it merge a patch from somebody it does not already know? A repository can have forty thousand stars, a busy issue tracker, and still never merge one."}));
 
-  const form = el("form", {class:"measure", style:"grid-template-columns:1fr auto;margin-bottom:2rem"}, [
+  const step = nextStep(data.repos);
+  frag.append(el("div", {class:"nextstep"}, [
+    el("p", {class:"doit", text:step.do}),
+    el("p", {class:"whyit", text:step.why})]));
+
+  const form = el("form", {class:"addrepo"}, [
     el("input", {id:"newrepo", placeholder:"owner/repo", "aria-label":"Repository to add",
-      style:"padding:0.5rem 0.7rem;border:1px solid var(--rule);border-radius:3px;background:var(--surface);font:inherit;width:100%"}),
+      autocomplete:"off", spellcheck:"false"}),
     el("button", {class:"act primary", type:"submit", text:"Probe and add"})]);
   form.addEventListener("submit", async e => {
     e.preventDefault();
@@ -321,37 +370,45 @@ async function renderWatchlist() {
     await runJob(e.submitter, "Probing…", () =>
       api("/api/probe", {method:"POST", headers:{"Content-Type":"application/json"},
         body:JSON.stringify({repo})}).then(r => {
-          flash(`${r.health.full_name}: ${r.health.verdict} (${r.points_spent} points)`);
+          flash(`${r.health.full_name}: ${SAYS[r.health.verdict] || r.health.verdict}`);
           renderWatchlist();
         }));
   });
   frag.append(form);
 
+  if (!data.repos.length) {
+    frag.append(el("div", {class:"empty"}, [
+      el("strong", {text:"Nothing here yet."}),
+      el("span", {text:"Paste a repository above and scout will read its last six months of merged pull requests to see whether newcomers get in."})]));
+    main.replaceChildren(frag);
+    return;
+  }
+
+  frag.append(el("h2", {text:"Where each one is"}));
   const columns = el("div", {class:"funnel"});
   for (const status of data.statuses) {
     const mine = data.repos.filter(r => r.status === status);
-    const col = el("div", {class:"col"}, el("h3", {html:`${status} <span>${mine.length}</span>`}));
+    const col = el("div", {class:"col"}, [
+      el("h3", {html:`${status} <span>${mine.length}</span>`}),
+      el("p", {class:"colnote", text:COLUMN[status] || ""})]);
     for (const repo of mine) {
-      // The visible name is inside spans the accessibility tree does not always reach,
-      // so say it explicitly - and say the verdict too, since the colour carries it.
       const card = el("button", {class:"repo", "data-repo":repo.full_name,
         "aria-label":`${repo.full_name}, ${SAYS[repo.verdict] || "not probed"}`,
         style:`border-left-color:${VERDICT[repo.verdict] || "var(--rule)"}`}, [
         el("span", {class:"name mono", text:repo.full_name}),
         el("span", {class:"chip", style:`color:${VERDICT[repo.verdict] || "var(--muted)"}`,
                     text:SAYS[repo.verdict] || "not probed"})]);
-      if (repo.newness_lower !== undefined) {
+      if (repo.newness_lower !== undefined)
         card.append(measure(
           scaleBar({lower:repo.newness_lower, upper:repo.newness_point, point:repo.newness_point,
                     color:VERDICT[repo.verdict] || "var(--viable)"}),
           pct(repo.newness_point)));
-      }
       if (repo.cold_start_minutes !== undefined)
         card.append(el("div", {class:"why", text:`${repo.cold_start_minutes} min to a green suite`}));
       if (repo.why) card.append(el("div", {class:"why", text:repo.why}));
       col.append(card);
     }
-    if (!mine.length) col.append(el("div", {class:"why", style:"color:var(--muted);font-size:0.8125rem", text:"—"}));
+    if (!mine.length) col.append(el("div", {class:"colempty", text:"none"}));
     columns.append(col);
   }
   frag.append(columns);
