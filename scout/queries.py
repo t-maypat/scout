@@ -6,7 +6,7 @@ into scout.metrics with no client at all.
 from __future__ import annotations
 
 OVERVIEW = """
-query Overview($owner: String!, $name: String!, $prs: Int!) {
+query Overview($owner: String!, $name: String!, $prs: Int!, $after: String) {
   rateLimit { cost remaining }
   repository(owner: $owner, name: $name) {
     nameWithOwner
@@ -25,8 +25,10 @@ query Overview($owner: String!, $name: String!, $prs: Int!) {
     merged: pullRequests(
       states: MERGED
       first: $prs
+      after: $after
       orderBy: { field: CREATED_AT, direction: DESC }
     ) {
+      pageInfo { hasNextPage endCursor }
       nodes {
         number
         createdAt
@@ -42,10 +44,11 @@ query Overview($owner: String!, $name: String!, $prs: Int!) {
 """
 
 ISSUES = """
-query Issues($owner: String!, $name: String!, $n: Int!) {
+query Issues($owner: String!, $name: String!, $n: Int!, $after: String) {
   rateLimit { cost remaining }
   repository(owner: $owner, name: $name) {
-    issues(first: $n, orderBy: { field: CREATED_AT, direction: DESC }) {
+    issues(first: $n, after: $after, orderBy: { field: CREATED_AT, direction: DESC }) {
+      pageInfo { hasNextPage endCursor }
       nodes {
         number
         title

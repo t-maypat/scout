@@ -406,3 +406,87 @@ class TestCoverage:
         health = build(overview([]))
         assert health.merged_coverage.describe() == "no sample"
         assert health.merged_coverage.fraction is None
+
+
+class TestFastRepoIsNotATrap:
+    """Regression: BerriAI/litellm scored TRAP with an 80% outsider merge rate.
+
+    A fixed hundred-row sample covered two days of a hundred-and-eighty-day window. In
+    two days on a repo merging fifty PRs a day, everyone who lands is already a repeat
+    CONTRIBUTOR - the first-timers from three months ago are outside the sample entirely.
+    So `cold_merges == 0` was an artefact of the page size, not a fact about the project.
+
+    The principle: a rate survives a short window, a count of a rare event does not.
+    """
+
+    def litellm_shaped(self, *, hours_old: float = 1.0):
+        # 100 merges, all from established outside contributors, inside two days.
+        merged = [merged_pr("CONTRIBUTOR", days_ago=i * 0.02, open_days=0.25) for i in range(80)]
+        merged += [merged_pr("MEMBER", days_ago=i * 0.02) for i in range(20)]
+        # 60 issues from outsiders, most of them only hours old, none answered yet.
+        nodes = [
+            issue("NONE", days_ago=hours_old / 24 + i * 0.05, comments=[]) for i in range(60)
+        ]
+        return metrics.build_health(
+            overview(merged, stargazerCount=58605),
+            issues_payload(nodes),
+            stale_payload(),
+            now=NOW,
+            merged_requested=100,
+            issues_requested=60,
+            unanswered_after_hours=72.0,
+            **WINDOW,
+        )
+
+    def test_it_is_not_a_trap(self):
+        health = self.litellm_shaped()
+        label, reasons = metrics.verdict(health)
+        assert label != metrics.TRAP, reasons
+
+    def test_it_refuses_to_judge_rather_than_guessing(self):
+        label, reasons = metrics.verdict(self.litellm_shaped())
+        assert label == metrics.THIN
+        assert any("too fast" in r for r in reasons)
+        assert any("larger --sample" in r for r in reasons)
+
+    def test_the_rate_is_still_reported_because_a_rate_survives_a_short_window(self):
+        health = self.litellm_shaped()
+        assert health.outsider_merge_rate == pytest.approx(0.8)
+        assert any("80% of merges came from outside" in r for r in metrics.verdict(health)[1])
+
+    def test_issues_younger_than_the_threshold_are_not_counted_as_ignored(self):
+        """An issue opened forty minutes ago is not being neglected."""
+        health = self.litellm_shaped(hours_old=1.0)
+        assert health.unanswered_outsider_issues == 0
+        assert health.outsider_issues == 0
+
+    def test_genuinely_old_silence_still_counts(self):
+        nodes = [issue("NONE", days_ago=20 + i) for i in range(12)]
+        health = metrics.build_health(
+            overview([merged_pr("CONTRIBUTOR") for _ in range(25)]),
+            issues_payload(nodes),
+            stale_payload(),
+            now=NOW,
+            merged_requested=0,
+            issues_requested=0,
+            unanswered_after_hours=72.0,
+            **WINDOW,
+        )
+        assert health.unanswered_outsider_issues == 12
+        assert metrics.verdict(health)[0] == metrics.TRAP
+
+    def test_a_slow_repo_with_no_first_timers_is_still_a_trap(self):
+        """The gate must not become a blanket excuse. Full coverage, zero cold merges,
+        still damning."""
+        merged = [merged_pr("MEMBER", days_ago=i * 4) for i in range(40)]
+        health = metrics.build_health(
+            overview(merged),
+            issues_payload([]),
+            stale_payload(),
+            now=NOW,
+            merged_requested=100,
+            issues_requested=60,
+            **WINDOW,
+        )
+        assert not health.merged_coverage.partial
+        assert metrics.verdict(health)[0] == metrics.TRAP
