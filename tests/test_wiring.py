@@ -172,3 +172,24 @@ def test_the_old_token_message_is_gone():
         and "rights to that resource" not in line
     ]
     assert not live, f"the replaced message is still raised: {live}"
+
+
+def test_a_misspelt_setting_in_env_is_caught(tmp_path):
+    """pydantic-settings ignores unknown variables, so a typo loads as nothing, silently."""
+    from scout.config import unknown_env_keys
+
+    env = tmp_path / ".env"
+    lines = ["SCOUT_GITHUB_TOKEN=x", "SCOUT_DICORD_BOT_TOKEN=y", "UNRELATED=z"]
+    env.write_text(chr(10).join(lines), encoding="utf-8")
+    assert unknown_env_keys(str(env)) == [
+        ("SCOUT_DICORD_BOT_TOKEN", "SCOUT_DISCORD_BOT_TOKEN")
+    ]
+
+
+def test_a_clean_env_reports_nothing(tmp_path):
+    from scout.config import unknown_env_keys
+
+    env = tmp_path / ".env"
+    lines = ["SCOUT_DISCORD_BOT_TOKEN=y", "SCOUT_DISCORD_CHANNEL_ID=1"]
+    env.write_text(chr(10).join(lines), encoding="utf-8")
+    assert unknown_env_keys(str(env)) == []
