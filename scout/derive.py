@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from scout.events import ISSUE_OBSERVED, PR_OBSERVED, Event, parse_time
-from scout.metrics import BEGINNER_LABELS, MAINTAINER, OUTSIDER
+from scout.metrics import BEGINNER_LABELS, MAINTAINER
 
 DERIVATION_VERSION = 1
 
@@ -50,9 +50,13 @@ class Subject:
     def is_open(self) -> bool:
         return self.state == "open"
 
-    @property
-    def by_outsider(self) -> bool:
-        return self.author_association in OUTSIDER
+    def by_maintainer(self, maintainers: frozenset[str]) -> bool:
+        """The association is unreliable - it reports MEMBER only for publicly visible
+        org membership - so the set the probe derived from who merged things wins."""
+        return self.author_association in MAINTAINER or self.author in maintainers
+
+    def by_outsider(self, maintainers: frozenset[str] = frozenset()) -> bool:
+        return not self.by_maintainer(maintainers)
 
     @property
     def beginner_labelled(self) -> bool:
@@ -216,6 +220,7 @@ def opportunities(
     unanswered_min_hours: float = 24,
     unanswered_max_days: int = 14,
     repos: Iterable[str] | None = None,
+    maintainers: dict[str, Iterable[str]] | None = None,
 ) -> list[Opportunity]:
     """Uncontested work, computed from current state. Never from a live API call.
 
@@ -224,11 +229,13 @@ def opportunities(
     """
     now = now or datetime.now(UTC)
     allowed = set(repos) if repos is not None else None
+    known = {repo: frozenset(logins) for repo, logins in (maintainers or {}).items()}
     found: list[Opportunity] = []
 
     for subject in state.subjects.values():
         if not subject.is_open or (allowed is not None and subject.repo not in allowed):
             continue
+        team = known.get(subject.repo, frozenset())
         idle = subject.idle_days(now)
 
         if subject.kind == ISSUE and subject.assignees and idle >= stale_assignment_days:
@@ -248,7 +255,7 @@ def opportunities(
         if (
             subject.kind == PULL
             and not subject.draft
-            and subject.author_association not in MAINTAINER
+            and not subject.by_maintainer(team)
             and idle >= abandoned_pr_days
         ):
             found.append(
@@ -270,7 +277,7 @@ def opportunities(
         age = subject.age_hours(now)
         if (
             subject.kind == ISSUE
-            and subject.by_outsider
+            and subject.by_outsider(team)
             and subject.comments == 0
             and not subject.assignees
             and not subject.beginner_labelled

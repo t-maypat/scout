@@ -164,6 +164,7 @@ def _entry_from(health: RepoHealth, existing: watchlist.WatchedRepo | None, why:
     entry.verdict_reasons = reasons
     entry.outsider_merge_rate = round(health.outsider_merge_rate.point, 3)
     entry.newness_lower = round(health.newness.lower, 4)
+    entry.maintainers = health.maintainers
     entry.newness_sufficient = health.newness_sufficient
     entry.newness_point = round(health.newness.point, 4)
     entry.cold_merges = health.cold_merges
@@ -437,6 +438,7 @@ def digest(send: bool = typer.Option(False, "--send", help="POST it to Discord")
         stale_assignment_days=settings.stale_assignment_days,
         abandoned_pr_days=settings.abandoned_pr_days,
         repos=repos,
+        maintainers={e.full_name: e.maintainers for e in book.repo if e.maintainers},
     )
     moves = derive.recent_transitions(state, within_hours=settings.transition_hours)
     titles = {s.key: (s.title, s.url) for s in state.subjects.values()}

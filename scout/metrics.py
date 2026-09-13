@@ -49,6 +49,26 @@ BEGINNER_LABELS = frozenset(
 BOT_TYPENAME = "Bot"
 
 
+def maintainers_from_merges(nodes: list[dict[str, Any]]) -> frozenset[str]:
+    """Who actually has write access, worked out from who merged things.
+
+    Reading this from authorAssociation does not work. That field reports MEMBER only
+    when a person has made their organisation membership public, and plenty of teams
+    never do - BerriAI has zero public members, so every comment on litellm comes back
+    NONE or CONTRIBUTOR and the field cannot name a single maintainer.
+
+    Merging is a permission. Nobody without write access can do it, and the person who
+    did is named in data the probe already fetches.
+    """
+    found: set[str] = set()
+    for node in nodes:
+        merger = node.get("mergedBy") or {}
+        login = merger.get("login")
+        if login and merger.get("__typename") != BOT_TYPENAME and not login.endswith("[bot]"):
+            found.add(login)
+    return frozenset(found)
+
+
 def _is_bot(node: dict[str, Any]) -> bool:
     author = node.get("author") or {}
     if author.get("__typename") == BOT_TYPENAME:
@@ -213,6 +233,8 @@ class RepoHealth:
     free_hour_overlap: float | None
 
     opportunities: list[Opportunity] = field(default_factory=list)
+    # Everyone observed merging something here. Reliable where the association is not.
+    maintainers: list[str] = field(default_factory=list)
 
     @property
     def association_disagrees(self) -> bool:
@@ -364,6 +386,7 @@ def _issue_metrics(
     window_days: int,
     now: datetime,
     unanswered_after_hours: float,
+    maintainers: frozenset[str],
 ) -> dict[str, Any]:
     reply_hours: list[float] = []
     unanswered = 0
@@ -383,13 +406,13 @@ def _issue_metrics(
         comments_seen += len(comments)
 
         for comment in comments:
-            if comment.get("authorAssociation") in MAINTAINER and (
+            if is_maintainer(comment, maintainers) and (
                 stamp := _parse(comment.get("createdAt"))
             ):
                 maintainer_hours.append(stamp.hour + stamp.minute / 60)
 
-        if node.get("authorAssociation") in OUTSIDER:
-            first_reply = _first_comment_at(comments, MAINTAINER)
+        if not is_maintainer(node, maintainers):
+            first_reply = _first_comment_at(comments, MAINTAINER, maintainers)
             if first_reply:
                 outsider_issues += 1
                 reply_hours.append(_hours_between(created, first_reply))
@@ -428,13 +451,28 @@ def _issue_metrics(
     }
 
 
+def is_maintainer(node: dict[str, Any], maintainers: frozenset[str]) -> bool:
+    """Either the association says so, or they have merged something here.
+
+    The union rather than one or the other: the association is right when it is readable,
+    and the merge list catches everyone it cannot see.
+    """
+    if node.get("authorAssociation") in MAINTAINER:
+        return True
+    login = (node.get("author") or {}).get("login")
+    return bool(login and login in maintainers)
+
+
 def _first_comment_at(
-    comments: list[dict[str, Any]], associations: frozenset[str]
+    comments: list[dict[str, Any]],
+    associations: frozenset[str],
+    maintainers: frozenset[str] = frozenset(),
 ) -> datetime | None:
     for comment in comments:
-        if comment.get("authorAssociation") in associations and (
-            stamp := _parse(comment.get("createdAt"))
-        ):
+        matched = comment.get("authorAssociation") in associations or (
+            maintainers and is_maintainer(comment, maintainers)
+        )
+        if matched and (stamp := _parse(comment.get("createdAt"))):
             return stamp
     return None
 
@@ -465,7 +503,11 @@ def _timezone_metrics(
 
 
 def _opportunities(
-    stale_data: dict[str, Any], now: datetime, assigned_days: int, pr_days: int
+    stale_data: dict[str, Any],
+    now: datetime,
+    assigned_days: int,
+    pr_days: int,
+    maintainers: frozenset[str] = frozenset(),
 ) -> list[Opportunity]:
     found: list[Opportunity] = []
 
@@ -498,7 +540,9 @@ def _opportunities(
         if not updated or node.get("isDraft"):
             continue
         idle = int(_hours_between(updated, now) / 24)
-        if idle < pr_days or node.get("authorAssociation") in MAINTAINER:
+        # A maintainer's own stale pull request is not yours to take over, and on an
+        # org with no public members the association will not tell you it is theirs.
+        if idle < pr_days or is_maintainer(node, maintainers):
             continue
         author = (node.get("author") or {}).get("login", "?")
         found.append(
@@ -548,8 +592,13 @@ def build_health(
     repo = overview["repository"]
     pushed = _parse(repo.get("pushedAt")) or now
 
+    merged_nodes = repo.get("merged", {}).get("nodes") or []
+    # Worked out before anything else needs it: the issue metrics and the opportunity
+    # filter both depend on knowing who can merge here.
+    maintainers = maintainers_from_merges(merged_nodes)
+
     merge = _merge_metrics(
-        repo.get("merged", {}).get("nodes") or [],
+        merged_nodes,
         cutoff,
         merged_requested,
         lookback_days,
@@ -567,6 +616,7 @@ def build_health(
         lookback_days,
         now,
         unanswered_after_hours,
+        maintainers,
     )
     tz = _timezone_metrics(issue.pop("_maintainer_hours"), free_hours)
 
@@ -583,8 +633,9 @@ def build_health(
         open_issues=repo.get("openIssues", {}).get("totalCount", 0),
         open_prs=repo.get("openPRs", {}).get("totalCount", 0),
         opportunities=_opportunities(
-            stale["repository"], now, stale_assignment_days, abandoned_pr_days
+            stale["repository"], now, stale_assignment_days, abandoned_pr_days, maintainers
         ),
+        maintainers=sorted(maintainers),
         **merge,
         **issue,
         **tz,

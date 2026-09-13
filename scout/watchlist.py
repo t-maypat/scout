@@ -44,6 +44,10 @@ class WatchedRepo(BaseModel):
     cold_merges: int | None = None
     # Whether the probe could settle the newness question at all. Without this a
     # repo verdicted 'cannot tell' still renders a definite-looking 0.0%.
+    # Everyone the last probe saw merge something. The poll cannot work this out from
+    # its own data - the issues endpoint does not say who merged anything - so the probe
+    # records it here and derivation reads it.
+    maintainers: list[str] = Field(default_factory=list)
     newness_sufficient: bool | None = None
     newness_point: float | None = None
     newness_lower: float | None = None

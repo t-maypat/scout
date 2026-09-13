@@ -37,6 +37,11 @@ query Overview($owner: String!, $name: String!, $prs: Int!, $after: String) {
         additions
         deletions
         author { __typename login }
+        # Ground truth for write access. authorAssociation reports MEMBER only for
+        # publicly visible org membership, so on an org where nobody has made their
+        # membership public it can never identify a maintainer - but merging is a
+        # permission, and whoever did it had one.
+        mergedBy { __typename login }
       }
     }
   }
