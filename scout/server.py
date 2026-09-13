@@ -414,6 +414,7 @@ def create_app() -> FastAPI:
             stale_assignment_days=settings.stale_assignment_days,
             abandoned_pr_days=settings.abandoned_pr_days,
             repos=repos,
+            maintainers={e.full_name: e.maintainers for e in book.repo if e.maintainers},
         )
         moves = derive.recent_transitions(state, within_hours=settings.transition_hours)
         titles = {s.key: (s.title, s.url) for s in state.subjects.values()}
@@ -472,6 +473,9 @@ def create_app() -> FastAPI:
                     stale_assignment_days=settings.stale_assignment_days,
                     abandoned_pr_days=settings.abandoned_pr_days,
                     repos=[full_name],
+                    maintainers=(
+                        {full_name: entry.maintainers} if entry and entry.maintainers else None
+                    ),
                 )
             ],
         }
@@ -643,6 +647,7 @@ def _entry_from(
     entry.verdict_reasons = reasons
     entry.outsider_merge_rate = round(health.outsider_merge_rate.point, 3)
     entry.cold_merges = health.cold_merges
+    entry.maintainers = health.maintainers
     entry.newness_sufficient = health.newness_sufficient
     entry.newness_point = round(health.newness.point, 4)
     entry.newness_lower = round(health.newness.lower, 4)

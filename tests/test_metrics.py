@@ -33,8 +33,10 @@ def merged_pr(
     open_days: float = 3,
     author: str = "someone",
     bot: bool = False,
+    merged_by: str | None = None,
 ) -> dict:
     return {
+        "mergedBy": ({"__typename": "User", "login": merged_by} if merged_by else None),
         "number": 1,
         "createdAt": ts(days_ago + open_days),
         "mergedAt": ts(days_ago),
@@ -701,3 +703,66 @@ class TestUnmeasurableIsNotBad:
         health = self.ignored_with_no_readable_maintainer()
         assert health.comments_seen == 0
         assert any("not fetched" in r for r in metrics.verdict(health)[1])
+
+
+class TestMaintainersComeFromMerges:
+    """BerriAI has zero public organisation members, so authorAssociation returns NONE or
+    CONTRIBUTOR for everybody on litellm - 100 recent comments, not one MEMBER, OWNER or
+    COLLABORATOR. The field cannot name a maintainer there at all.
+
+    Merging is a permission. Whoever did it had write access, and the probe already
+    fetches who it was.
+    """
+
+    def test_the_merger_is_recognised_as_a_maintainer(self):
+        nodes = [merged_pr("NONE", author="stranger", merged_by="ishaan")]
+        assert metrics.maintainers_from_merges(nodes) == frozenset({"ishaan"})
+
+    def test_bots_that_merge_are_not_maintainers(self):
+        nodes = [
+            {"mergedBy": {"__typename": "Bot", "login": "mergify"}},
+            {"mergedBy": {"__typename": "User", "login": "renovate[bot]"}},
+        ]
+        assert metrics.maintainers_from_merges(nodes) == frozenset()
+
+    def test_an_unmerged_or_unknown_merger_contributes_nothing(self):
+        assert metrics.maintainers_from_merges([{"mergedBy": None}, {}]) == frozenset()
+
+    def test_a_reply_from_a_merger_counts_even_when_the_association_hides_it(self):
+        """The whole point: litellm's maintainers reply as NONE."""
+        merged = [merged_pr("NONE", days_ago=d, author="x", merged_by="ishaan")
+                  for d in range(1, 40)]
+        nodes = [
+            issue("NONE", days_ago=20 + i,
+                  comments=[{"createdAt": ts(19 + i), "authorAssociation": "NONE",
+                             "author": {"login": "ishaan"}}])
+            for i in range(12)
+        ]
+        health = build(overview(merged), issues_payload(nodes))
+        assert health.maintainers == ["ishaan"]
+        assert health.maintainer_comments_seen == 12
+        assert health.unanswered_outsider_issues == 0
+
+    def test_without_the_merge_set_those_replies_would_be_invisible(self):
+        """Same data, no mergedBy: every reply vanishes and the repo looks ignored."""
+        merged = [merged_pr("NONE", days_ago=d, author="x") for d in range(1, 40)]
+        nodes = [
+            issue("NONE", days_ago=20 + i,
+                  comments=[{"createdAt": ts(19 + i), "authorAssociation": "NONE",
+                             "author": {"login": "ishaan"}}])
+            for i in range(12)
+        ]
+        health = build(overview(merged), issues_payload(nodes))
+        assert health.maintainer_comments_seen == 0
+        assert health.unanswered_outsider_issues == 12
+
+    def test_a_maintainers_own_stale_pr_is_not_offered_to_you(self):
+        merged = [merged_pr("NONE", days_ago=d, author="x", merged_by="ishaan")
+                  for d in range(1, 40)]
+        stale = stale_payload(prs=[{
+            "number": 99, "title": "wip", "url": "u",
+            "createdAt": ts(120), "updatedAt": ts(60), "isDraft": False,
+            "authorAssociation": "NONE", "author": {"login": "ishaan"},
+        }])
+        health = build(overview(merged), issues_payload([]), stale)
+        assert health.opportunities == []

@@ -325,3 +325,42 @@ class TestDigest:
     def test_posting_without_a_webhook_is_an_error_not_a_silent_no_op(self):
         with pytest.raises(ValueError, match="webhook"):
             notify.post("", {"content": "hi"})
+
+
+class TestPollSideUsesTheSameMaintainerSet:
+    """The poll has the same blind spot and cannot fix it alone: the issues endpoint
+    never says who merged anything. The probe works it out and records it; derivation
+    reads it from the watchlist."""
+
+    def state_with(self, **kw):
+        return derive.derive([to_event(row(**kw), REPO, observed_at=NOW)])
+
+    def test_a_maintainers_stale_pr_is_not_an_opportunity(self):
+        state = self.state_with(
+            number=99, pull=True, author="ishaan", association="NONE", updated=60, created=90
+        )
+        assert derive.opportunities(state, now=NOW) != []
+        assert derive.opportunities(
+            state, now=NOW, maintainers={REPO: ["ishaan"]}
+        ) == []
+
+    def test_a_maintainers_own_issue_is_not_an_unanswered_report(self):
+        state = self.state_with(
+            number=7, author="ishaan", association="NONE", comments=0, updated=3, created=3
+        )
+        assert derive.opportunities(state, now=NOW) != []
+        assert derive.opportunities(state, now=NOW, maintainers={REPO: ["ishaan"]}) == []
+
+    def test_an_outsider_is_still_an_outsider(self):
+        state = self.state_with(
+            number=8, author="stranger", association="NONE", comments=0, updated=3, created=3
+        )
+        found = derive.opportunities(state, now=NOW, maintainers={REPO: ["ishaan"]})
+        assert [o.kind for o in found] == ["unanswered-report"]
+
+    def test_the_set_is_scoped_to_its_own_repo(self):
+        state = self.state_with(
+            number=99, pull=True, author="ishaan", association="NONE", updated=60, created=90
+        )
+        found = derive.opportunities(state, now=NOW, maintainers={"other/repo": ["ishaan"]})
+        assert [o.kind for o in found] == ["abandoned-pr"]
