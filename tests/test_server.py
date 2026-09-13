@@ -78,9 +78,9 @@ def test_dismissing_hides_an_item_from_discord_too(client):
     """The dashboard and the digest read the same record, so dismissing here is not a
     second source of truth that the notifier can disagree with."""
     client.post("/api/intent", json={"key": "acme/widget#1:abandoned-pr", "action": "dismiss"})
+    from scout.config import get_settings
     from scout.events import EventLog
     from scout.notify import already_sent
-    from scout.config import get_settings
 
     assert "acme/widget#1:abandoned-pr" in already_sent(
         EventLog(get_settings().events_dir).read()
@@ -105,3 +105,71 @@ def test_concurrent_callers_do_not_both_get_the_lock():
         server._run_exclusive(slow)
     t.join()
     assert len(entered) == 1
+
+
+class TestFailuresAreAnswers:
+    """A 500 tells the person at the browser nothing. Every failure has a cause worth
+    naming, and the page should show it."""
+
+    def test_a_network_failure_is_a_502_not_a_500(self):
+        import httpx
+
+        err = server._as_http_error(httpx.ConnectError("no route"), "probing acme/widget")
+        assert err.status_code == 502
+        assert "Could not reach GitHub" in err.detail
+
+    def test_a_slow_github_is_a_504(self):
+        import httpx
+
+        assert server._as_http_error(httpx.ReadTimeout("slow"), "probing").status_code == 504
+
+    def test_the_whole_operation_deadline_is_a_504(self):
+        from scout.github import Timeout
+
+        err = server._as_http_error(Timeout("gave up after 90s"), "probing")
+        assert err.status_code == 504
+        assert "90s" in err.detail
+
+    def test_rate_limiting_says_when_it_clears(self):
+        from scout.github import RateLimited
+
+        err = server._as_http_error(RateLimited(30), "probing")
+        assert err.status_code == 429
+        assert "hourly" in err.detail
+
+    def test_a_missing_repo_does_not_leak_the_query(self):
+        from scout.github import NotFound
+
+        assert server._as_http_error(NotFound("/graphql"), "probing").status_code == 404
+
+    def test_a_genuine_bug_still_names_itself(self):
+        err = server._as_http_error(KeyError("repository"), "probing acme/widget")
+        assert err.status_code == 500
+        assert "KeyError" in err.detail
+
+    def test_an_http_exception_passes_through_unchanged(self):
+        original = server.Busy()
+        assert server._as_http_error(original, "probing") is original
+
+
+class TestEveryRouteLoads:
+    """FastAPI builds a response model from each return annotation, so a bad one is a
+    startup error rather than a 500 - and the suite has to catch it before the browser
+    does."""
+
+    def test_the_app_constructs(self):
+        assert server.create_app() is not None
+
+    def test_docs_are_served_from_the_tracked_file(self, client):
+        r = client.get("/docs")
+        assert r.status_code == 200
+        assert "scout" in r.text
+        assert "Back to scout" in r.text
+
+    def test_every_get_route_answers(self, client):
+        for path in ("/", "/docs", "/api/glossary", "/api/overview", "/api/inbox"):
+            assert client.get(path).status_code == 200, path
+
+    def test_an_unknown_repo_detail_is_empty_not_an_error(self, client):
+        body = client.get("/api/repo/acme/widget").json()
+        assert body["entry"] is None and body["health"] is None
