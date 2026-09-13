@@ -246,10 +246,21 @@ def list_repos():
 
 
 @app.command()
-def refresh():
-    """Re-probe every repository on the watchlist that is not already rejected."""
+def refresh(
+    revisit: bool = typer.Option(
+        False, "--revisit", help="Re-probe rejected repos too, and un-reject any that clear"
+    ),
+    pages: int = typer.Option(DEFAULT_MAX_PAGES, "--pages", help="Page budget per repo"),
+):
+    """Re-probe the watchlist and report verdict changes.
+
+    Rejected repositories are skipped unless --revisit is given. That flag matters after
+    the scoring itself changes: a repo rejected by a rule that has since been corrected
+    would otherwise stay rejected forever, and the verdict that convicted it is exactly
+    the thing no longer trusted.
+    """
     book = watchlist.load()
-    live = [r for r in book.repo if r.status != "rejected"]
+    live = [r for r in book.repo if revisit or r.status != "rejected"]
     if not live:
         console.print("[dim]nothing to refresh[/]")
         return
@@ -257,7 +268,7 @@ def refresh():
     with _client() as client:
         for entry in live:
             try:
-                health = run_probe(client, entry.full_name)
+                health = run_probe(client, entry.full_name, max_pages=pages)
             except GitHubError as exc:
                 console.print(f"[red]{entry.full_name}: {exc}[/]")
                 continue
@@ -269,6 +280,14 @@ def refresh():
                     f"({'; '.join(updated.verdict_reasons)})"
                 )
             updated.status = entry.status
+            cleared = updated.verdict not in (metrics.DEAD, metrics.TRAP)
+            if entry.status == "rejected" and cleared:
+                # Back to the start of the funnel, not straight to green: clearing the
+                # verdict says it is worth looking at, not that you can build it.
+                updated.status = "candidate"
+                console.print(
+                    f"[green]{entry.full_name}: no longer rejected[/] - back to candidate"
+                )
             book.upsert(updated)
             if health.opportunities:
                 console.print(
