@@ -318,7 +318,9 @@ GitHub is a link button and needs nothing at all.
 
 `.github/workflows/poll.yml` runs every 15 minutes; `digest.yml` at 14:30 UTC.
 
-Repository secrets: `SCOUT_GITHUB_TOKEN`, `SCOUT_DISCORD_WEBHOOK_URL`. Settings →
+Repository secrets: `SCOUT_GITHUB_TOKEN`, plus either `SCOUT_DISCORD_WEBHOOK_URL` for plain
+notifications or `SCOUT_DISCORD_BOT_TOKEN` and `SCOUT_DISCORD_CHANNEL_ID` for threads and
+buttons. Settings →
 Actions → General → Workflow permissions must be **Read and write**, or the poll job
 cannot commit the log.
 

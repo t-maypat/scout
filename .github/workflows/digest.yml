@@ -36,6 +36,10 @@ jobs:
         env:
           SCOUT_GITHUB_TOKEN: ${{ secrets.SCOUT_GITHUB_TOKEN }}
           SCOUT_DISCORD_WEBHOOK_URL: ${{ secrets.SCOUT_DISCORD_WEBHOOK_URL }}
+          # Without these the scheduled run silently falls back to the webhook:
+          # no threads, no buttons, and nothing in the log says so.
+          SCOUT_DISCORD_BOT_TOKEN: ${{ secrets.SCOUT_DISCORD_BOT_TOKEN }}
+          SCOUT_DISCORD_CHANNEL_ID: ${{ secrets.SCOUT_DISCORD_CHANNEL_ID }}
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             uv run scout digest
@@ -46,10 +50,12 @@ jobs:
       - name: Record what was sent
         if: ${{ inputs.dry_run != true }}
         run: |
-          if [ -z "$(git status --porcelain events)" ]; then exit 0; fi
+          if [ -z "$(git status --porcelain events state)" ]; then exit 0; fi
           git config user.name "scout"
           git config user.email "scout@users.noreply.github.com"
-          git add events
+          # state/ holds today's Discord thread ids. Without it a second run on the
+          # same day cannot find the thread and opens a duplicate.
+          git add events state
           git commit -m "digest sent: $(date -u +%Y-%m-%dT%H:%MZ)"
           git pull --rebase --autostash
           git push
