@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from scout.stats import Proportion, wilson
+
 # GitHub's authorAssociation, split by whether the person can merge.
 MAINTAINER = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 # CONTRIBUTOR means "has landed something here before but is not on the team" - the state
@@ -41,6 +43,21 @@ BEGINNER_LABELS = frozenset(
         "hacktoberfest",
     }
 )
+
+# Automation merges constantly and is never a newcomer, so leaving it in the denominator
+# quietly deflates every rate. GraphQL types the author, which beats guessing from names.
+BOT_TYPENAME = "Bot"
+
+
+def _is_bot(node: dict[str, Any]) -> bool:
+    author = node.get("author") or {}
+    if author.get("__typename") == BOT_TYPENAME:
+        return True
+    login = (author.get("login") or "").lower()
+    # __typename is absent from recorded fixtures and older responses; the suffix is the
+    # convention GitHub itself uses for app accounts.
+    return login.endswith("[bot]") or login in {"dependabot", "renovate", "github-actions"}
+
 
 IST_OFFSET_HOURS = 5.5
 # A working day peaks mid-afternoon. Used only to turn an observed activity peak into a
@@ -164,10 +181,16 @@ class RepoHealth:
     open_prs: int
 
     merged_sample: int
-    outsider_merge_rate: float
+    outsider_merge_rate: Proportion
     cold_merges: int
     median_days_to_merge_outsider: float | None
     merged_coverage: Coverage
+
+    newness: Proportion
+    newness_sufficient: bool
+    newness_note: str
+    newness_scored_days: float
+    bots_excluded: int
 
     outsider_issues: int
     median_hours_to_maintainer_reply: float | None
@@ -184,6 +207,16 @@ class RepoHealth:
     opportunities: list[Opportunity] = field(default_factory=list)
 
     @property
+    def association_disagrees(self) -> bool:
+        """authorAssociation says nobody new has landed, the author history says otherwise.
+        Evidence that the field describes the present, not the merge."""
+        return self.cold_merges == 0 and self.newness_sufficient and self.newness.lower > 0.02
+
+    @property
+    def unanswered_rate(self) -> Proportion:
+        return wilson(self.unanswered_outsider_issues, self.outsider_issues)
+
+    @property
     def timezone_note(self) -> str:
         if self.maintainer_utc_offset is None:
             return "spread out - no single working day"
@@ -197,18 +230,100 @@ class RepoHealth:
         return f"UTC{offset:+.0f}"
 
 
+def _newness(
+    merged: list[dict[str, Any]],
+    *,
+    burn_in_days: float,
+    min_burn_in_merges: int,
+    min_scored_merges: int,
+) -> dict[str, Any]:
+    """What share of merged pull requests were somebody's first one here.
+
+    Derived from author logins and dates, not from GitHub's authorAssociation. That field
+    describes how a person is associated *now*, so someone who broke in six months ago
+    reads as an established CONTRIBUTOR today and their first merge disappears from any
+    historical window. Counting first appearances ourselves is immune to that.
+
+    The cost is a burn-in: an author whose real first contribution predates the sample
+    would otherwise look new the moment they show up. So the earliest stretch of the
+    window is spent only establishing who was already known, and nothing in it is scored.
+    If the sample cannot afford both a burn-in and enough merges after it, this refuses
+    rather than returning a biased rate with a confident-looking interval around it.
+    """
+    people = [n for n in merged if not _is_bot(n)]
+    dated = [(stamp, n) for n in people if (stamp := _parse(n.get("mergedAt"))) is not None]
+    dated.sort(key=lambda pair: pair[0])
+
+    if len(dated) < min_burn_in_merges + min_scored_merges:
+        return {
+            "newness": wilson(0, 0),
+            "newness_sufficient": False,
+            "newness_note": (
+                f"{len(dated)} human merges - need "
+                f"{min_burn_in_merges + min_scored_merges} to establish a baseline "
+                "and still have something to score"
+            ),
+            "newness_scored_days": 0.0,
+            "bots_excluded": len(merged) - len(people),
+        }
+
+    oldest, newest = dated[0][0], dated[-1][0]
+    span_days = (newest - oldest).total_seconds() / 86400
+    burn_in = max(burn_in_days, span_days * 0.2)
+    boundary = oldest + timedelta(days=burn_in)
+
+    known: set[str] = set()
+    scored = 0
+    first_timers = 0
+    for stamp, node in dated:
+        login = (node.get("author") or {}).get("login") or ""
+        if stamp < boundary:
+            known.add(login)
+            continue
+        scored += 1
+        if login and login not in known:
+            first_timers += 1
+        known.add(login)
+
+    if scored < min_scored_merges:
+        return {
+            "newness": wilson(0, 0),
+            "newness_sufficient": False,
+            "newness_note": (
+                f"only {scored} merges after a {burn_in:.0f}d burn-in - "
+                "probe deeper with --pages"
+            ),
+            "newness_scored_days": max(span_days - burn_in, 0.0),
+            "bots_excluded": len(merged) - len(people),
+        }
+
+    return {
+        "newness": wilson(first_timers, scored),
+        "newness_sufficient": True,
+        "newness_note": "",
+        "newness_scored_days": max(span_days - burn_in, 0.0),
+        "bots_excluded": len(merged) - len(people),
+    }
+
+
 def _merge_metrics(
-    nodes: list[dict[str, Any]], cutoff: datetime, requested: int, window_days: int
+    nodes: list[dict[str, Any]],
+    cutoff: datetime,
+    requested: int,
+    window_days: int,
+    newness_args: dict[str, Any],
 ) -> dict[str, Any]:
     merged = [n for n in nodes if (m := _parse(n.get("mergedAt"))) is not None and m >= cutoff]
     coverage = _coverage(nodes, merged, requested, window_days)
+    newness = _newness(merged, **newness_args)
     if not merged:
         return {
             "merged_sample": 0,
-            "outsider_merge_rate": 0.0,
+            "outsider_merge_rate": wilson(0, 0),
             "cold_merges": 0,
             "median_days_to_merge_outsider": None,
             "merged_coverage": coverage,
+            **newness,
         }
 
     outsiders = [n for n in merged if n.get("authorAssociation") in OUTSIDER]
@@ -222,10 +337,14 @@ def _merge_metrics(
 
     return {
         "merged_sample": len(merged),
-        "outsider_merge_rate": len(outsiders) / len(merged),
+        "outsider_merge_rate": wilson(len(outsiders), len(merged)),
+        # Kept for display only. Comparing it against the derived newness rate is the
+        # cheapest test of whether authorAssociation is trustworthy about history: a zero
+        # here beside a healthy newness rate means the field is describing today.
         "cold_merges": len(cold),
         "median_days_to_merge_outsider": statistics.median(latencies) if latencies else None,
         "merged_coverage": coverage,
+        **newness,
     }
 
 
@@ -398,6 +517,9 @@ def build_health(
     merged_requested: int = 0,
     issues_requested: int = 0,
     unanswered_after_hours: float = 72.0,
+    newness_burn_in_days: float = 14.0,
+    newness_min_burn_in_merges: int = 30,
+    newness_min_scored_merges: int = 40,
     now: datetime | None = None,
 ) -> RepoHealth:
     """Pure: three recorded API responses in, one health record out.
@@ -415,7 +537,15 @@ def build_health(
     pushed = _parse(repo.get("pushedAt")) or now
 
     merge = _merge_metrics(
-        repo.get("merged", {}).get("nodes") or [], cutoff, merged_requested, lookback_days
+        repo.get("merged", {}).get("nodes") or [],
+        cutoff,
+        merged_requested,
+        lookback_days,
+        {
+            "burn_in_days": newness_burn_in_days,
+            "min_burn_in_merges": newness_min_burn_in_merges,
+            "min_scored_merges": newness_min_scored_merges,
+        },
     )
     issue = _issue_metrics(
         issues["repository"]["issues"]["nodes"] or [],
@@ -455,7 +585,23 @@ DEAD, TRAP, THIN, VIABLE, GOOD = "DEAD", "TRAP", "THIN", "VIABLE", "GOOD"
 RANK = {DEAD: 0, TRAP: 1, THIN: 2, VIABLE: 3, GOOD: 4}
 
 
+# Where the verdict lines are drawn. These are the numbers to argue with after probing
+# real repositories; everything above them is machinery.
+CLOSED_SHOP_CEILING = 0.02  # newness CI upper below this: newcomers do not land here
+OPEN_DOOR_FLOOR = 0.05  # newness CI lower above this: they reliably do
+IGNORED_FLOOR = 0.80  # unanswered CI lower above this: outsiders get no reply
+
+
 def verdict(health: RepoHealth) -> tuple[str, list[str]]:
+    """Judge the interval, never the point estimate.
+
+    A bare rate cannot distinguish "no newcomers, and we looked hard" from "no newcomers,
+    and we barely looked". The bound does it for free: zero first-timers out of a hundred
+    merges puts the ceiling near 3.6%, not low enough to convict; zero out of a thousand
+    puts it at 0.4%, which is. The sample size does the arguing, which is exactly what an
+    absolute threshold like `cold_merges >= 3` could never do - that rule certified
+    repositories on thirty merges, where the honest interval is 3% to 26%.
+    """
     if health.archived:
         return DEAD, ["archived"]
     if not health.issues_enabled:
@@ -463,44 +609,42 @@ def verdict(health: RepoHealth) -> tuple[str, list[str]]:
     if health.days_since_push > 120:
         return DEAD, [f"no push in {health.days_since_push} days"]
 
-    # A rate stays trustworthy in a short window; a count of a rare event does not.
-    # `outsider_merge_rate` over a hundred merges is solid even if they all landed in two
-    # days. `cold_merges == 0` over those same two days means nothing at all - on a fast
-    # repository everyone who merges this week is already a repeat CONTRIBUTOR, and the
-    # first-timers from three months ago are outside the sample. So the absence-based
-    # rules are gated on coverage and the rate-based one is not.
+    newness = health.newness
+    unanswered = health.unanswered_rate
+    notes = _notes(health)
+
     fatal: list[str] = []
-    if (
-        health.merged_sample >= 20
-        and health.cold_merges == 0
-        and not health.merged_coverage.partial
-    ):
-        fatal.append(f"{health.merged_sample} PRs merged, none from a first-time contributor")
-    if health.merged_sample >= 20 and health.outsider_merge_rate < 0.05:
-        fatal.append(f"only {health.outsider_merge_rate:.0%} of merges came from outside")
-    if (
-        health.outsider_issues >= 10
-        and health.unanswered_outsider_issues / health.outsider_issues > 0.8
-        and not health.issue_coverage.partial
-    ):
-        fatal.append("maintainers answer fewer than 1 in 5 outsider issues")
+    if health.newness_sufficient and newness.upper < CLOSED_SHOP_CEILING:
+        fatal.append(
+            f"at best {newness.upper:.1%} of merges are someone's first "
+            f"({newness.successes}/{newness.total}) - a closed shop"
+        )
+    if health.merged_sample >= 20 and health.outsider_merge_rate.upper < 0.05:
+        fatal.append(
+            f"at best {health.outsider_merge_rate.upper:.0%} of merges come from outside"
+        )
+    if unanswered.total >= 10 and unanswered.lower > IGNORED_FLOOR:
+        fatal.append(
+            f"at least {unanswered.lower:.0%} of outsider issues go unanswered "
+            f"({unanswered.successes}/{unanswered.total})"
+        )
     if fatal:
-        return TRAP, fatal
+        return TRAP, fatal + notes
 
-    if health.merged_sample < 10:
-        return THIN, [f"only {health.merged_sample} merges in the window - too few to judge"]
-
-    # The opposite shortfall: not too few merges, too many in too little time. The page
-    # size ran out before the window did, so the evidence that would convict is simply
-    # not in the sample. Refusing to judge is the honest answer, not a soft verdict.
-    if health.cold_merges == 0 and health.merged_coverage.partial:
-        span = health.merged_coverage.span_days or 0
+    # Refusing to judge is a real answer, and the common one for very fast repositories
+    # where a page budget buys days rather than months.
+    if not health.newness_sufficient:
         return THIN, [
-            f"{health.merged_sample} merges in {span:.0f}d - too fast for a "
-            f"{health.merged_coverage.requested}-row sample to see first-timers",
-            f"but {health.outsider_merge_rate:.0%} of merges came from outside, "
-            "which a short window does not distort",
-            "re-probe with a larger --sample to judge it",
+            health.newness_note,
+            f"but {health.outsider_merge_rate.point:.0%} of merges came from outside "
+            f"({health.merged_sample} sampled), which a short window does not distort",
+            *notes,
+        ]
+    if newness.undetermined:
+        return THIN, [
+            f"first-timer share is {newness.lower:.1%}-{newness.upper:.1%} - "
+            "too wide to call either way, probe deeper with --pages",
+            *notes,
         ]
 
     warn: list[str] = []
@@ -511,19 +655,26 @@ def verdict(health: RepoHealth) -> tuple[str, list[str]]:
     if (overlap := health.free_hour_overlap) is not None and overlap < 0.05:
         warn.append("maintainers are never active during your free hours")
 
-    # Caveats describe how much of the window was seen. They never change the verdict:
-    # cold_merges is a count, so five first-timers merged inside nine days is stronger
-    # evidence than five across six months, not weaker. What a short window does distort
-    # is the latency numbers, and that is what these say out loud.
-    caveats = coverage_caveats(health)
-
-    if health.cold_merges >= 3 and health.outsider_merge_rate >= 0.25 and not warn:
+    if newness.lower > OPEN_DOOR_FLOOR and not warn:
         return GOOD, [
-            f"{health.cold_merges} first-timers merged, "
-            f"{health.outsider_merge_rate:.0%} of merges from outside",
-            *caveats,
+            f"at least {newness.lower:.1%} of merges are someone's first "
+            f"({newness.successes}/{newness.total} over {health.newness_scored_days:.0f}d)",
+            *notes,
         ]
-    return VIABLE, [*(warn or ["nothing disqualifying"]), *caveats]
+    return VIABLE, [*(warn or [f"first-timer share {newness.describe()}"]), *notes]
+
+
+def _notes(health: RepoHealth) -> list[str]:
+    """Things worth saying that do not change the verdict."""
+    notes: list[str] = []
+    if health.association_disagrees:
+        notes.append(
+            "authorAssociation reports 0 first-timers while author history reports "
+            f"{health.newness.point:.1%} - the field describes today, not the merge"
+        )
+    if health.bots_excluded:
+        notes.append(f"{health.bots_excluded} bot merges excluded")
+    return notes
 
 
 def coverage_caveats(health: RepoHealth) -> list[str]:
@@ -544,8 +695,10 @@ def coverage_caveats(health: RepoHealth) -> list[str]:
 
 
 def sort_key(health: RepoHealth) -> tuple[int, float]:
-    """Rank order for a list of probes: best verdict first, then openness to strangers."""
-    return RANK[verdict(health)[0]], health.outsider_merge_rate
+    """Rank order for a list of probes: best verdict first, then confidence that a
+    newcomer gets merged - the lower bound, so a wide interval never outranks a settled
+    one purely by having a flattering midpoint."""
+    return RANK[verdict(health)[0]], health.newness.lower
 
 
 def rank(healths: Iterable[RepoHealth]) -> list[RepoHealth]:

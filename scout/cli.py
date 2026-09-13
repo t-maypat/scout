@@ -43,6 +43,14 @@ def _fmt_hours(hours: float | None) -> str:
     return f"{hours / 24:.0f}d"
 
 
+def _interval_bar(lower: float, upper: float, scale: float = 0.30, width: int = 24) -> str:
+    """The confidence interval as a bar. A wide band reads as "we cannot tell" at a
+    glance, which no amount of printing 3.4%-26.1% ever achieves."""
+    lo = min(int(lower / scale * width), width - 1)
+    hi = min(max(int(upper / scale * width), lo + 1), width)
+    return f"[dim]{'.' * lo}[/][cyan]{'=' * (hi - lo)}[/][dim]{'.' * (width - hi)}[/]"
+
+
 def _card(health: RepoHealth) -> Panel:
     label, reasons = metrics.verdict(health)
     style = VERDICT_STYLE[label]
@@ -57,13 +65,24 @@ def _card(health: RepoHealth) -> Panel:
     table.add_row("", "")
     table.add_row(
         "merges from outside",
-        f"{health.outsider_merge_rate:.0%} of {health.merged_sample} merged PRs",
+        f"{health.outsider_merge_rate.point:.0%} of {health.merged_sample} merged PRs",
     )
-    table.add_row(
-        "first-timers merged",
-        f"[{'green' if health.cold_merges >= 3 else 'red'}]{health.cold_merges}[/]"
-        "   [dim](the number that matters)[/]",
-    )
+    newness = health.newness
+    if health.newness_sufficient:
+        table.add_row(
+            "somebody's first merge",
+            f"[bold]{newness.point:.1%}[/]  {_interval_bar(newness.lower, newness.upper)}  "
+            f"[dim]{newness.lower:.1%}-{newness.upper:.1%}[/]",
+        )
+        table.add_row(
+            "",
+            f"[dim]{newness.successes} of {newness.total} scored merges over "
+            f"{health.newness_scored_days:.0f}d (the number that matters)[/]",
+        )
+    else:
+        table.add_row("somebody's first merge", f"[yellow]cannot tell[/] - {health.newness_note}")
+    if health.bots_excluded:
+        table.add_row("", f"[dim]{health.bots_excluded} bot merges excluded[/]")
     table.add_row("outsider PR merge time", _fmt_hours(
         None if health.median_days_to_merge_outsider is None
         else health.median_days_to_merge_outsider * 24
@@ -136,7 +155,9 @@ def _entry_from(health: RepoHealth, existing: watchlist.WatchedRepo | None, why:
     entry.last_probed = datetime.now(UTC)
     entry.verdict = label
     entry.verdict_reasons = reasons
-    entry.outsider_merge_rate = round(health.outsider_merge_rate, 3)
+    entry.outsider_merge_rate = round(health.outsider_merge_rate.point, 3)
+    entry.newness_lower = round(health.newness.lower, 4)
+    entry.newness_point = round(health.newness.point, 4)
     entry.cold_merges = health.cold_merges
     entry.maintainer_utc_offset = health.maintainer_utc_offset
     if existing is None and label in (metrics.DEAD, metrics.TRAP):
