@@ -325,9 +325,54 @@ class TestDigest:
     def test_an_empty_digest_reports_itself_empty(self):
         assert notify.build_digest([]).empty
 
-    def test_posting_without_a_webhook_is_an_error_not_a_silent_no_op(self):
-        with pytest.raises(ValueError, match="webhook"):
-            notify.post("", {"content": "hi"})
+    def test_posting_with_nowhere_to_send_is_an_error_not_a_silent_no_op(self):
+        with pytest.raises(ValueError, match="nowhere to send"):
+            notify.post({"content": "hi"})
+
+
+class TestButtonsNeedTheBot:
+    """Discord ignores interactive components from a webhook that is not owned by an
+    application, so a webhook created by hand in the UI can never carry buttons however
+    it is called. That is the only reason the bot transport exists."""
+
+    def digest_of(self, n=3):
+        return notify.build_digest([
+            derive.Opportunity(REPO, i, "abandoned-pr", f"thing {i}",
+                               f"https://github.com/{REPO}/pull/{i}", 40, "author gone")
+            for i in range(n)
+        ])
+
+    def test_webhook_mode_sends_one_message_and_no_components(self):
+        messages = self.digest_of().to_messages(with_buttons=False)
+        assert len(messages) == 1
+        assert "components" not in messages[0]
+
+    def test_bot_mode_sends_a_header_then_one_message_per_item(self):
+        """Components attach to a message, not an embed, so eight embeds in one message
+        could only ever share one row of buttons."""
+        messages = self.digest_of(3).to_messages(with_buttons=True)
+        assert len(messages) == 4
+        assert "components" not in messages[0], "the header carries no actions"
+        assert all("components" in m for m in messages[1:])
+
+    def test_the_link_button_needs_nothing_listening(self):
+        row = self.digest_of(1).to_messages(with_buttons=True)[1]["components"][0]
+        link = row["components"][0]
+        assert link["style"] == notify.LINK and link["url"].startswith("https://")
+        assert "custom_id" not in link, "a link button is handled by Discord itself"
+
+    def test_action_ids_match_what_the_receiver_parses(self):
+        import re
+
+        pattern = re.compile(r"^(claim|dispatch|snooze|dismiss):([\w.-]+/[\w.-]+):(\d+)$")
+        row = self.digest_of(1).to_messages(with_buttons=True)[1]["components"][0]
+        ids = [c["custom_id"] for c in row["components"] if "custom_id" in c]
+        assert ids and all(pattern.match(i) for i in ids), ids
+
+    def test_a_digest_never_exceeds_the_embed_ceiling(self):
+        messages = self.digest_of(30).to_messages(with_buttons=True)
+        assert len(messages) <= notify.MAX_EMBEDS
+        assert all(len(m["embeds"]) == 1 for m in messages)
 
 
 class TestPollSideUsesTheSameMaintainerSet:

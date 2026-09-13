@@ -8,3 +8,6 @@ probes/
 node_modules/
 worker/.wrangler/
 .DS_Store
+
+# Private working notes: what was believed, what was true, what it cost.
+LEARNINGS.md
