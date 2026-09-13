@@ -31,6 +31,9 @@ class Settings(BaseSettings):
 
     # Probe windows. Wider windows cost more rate limit and blur recent changes in a
     # project's behaviour; these are the defaults every reported metric is measured over.
+    # Pages the prober will walk before giving up on covering the window. One page is
+    # one rate-limit point, so the default is cheap and raising it is not expensive.
+    probe_pages: int = 4
     merged_pr_sample: int = 100
     issue_sample: int = 60
     lookback_days: int = 180
@@ -48,7 +51,7 @@ class Settings(BaseSettings):
     # this interval to keep the log accurate, but send at digest_hour_local.
     poll_per_page: int = 100
     poll_only_actionable: bool = True
-    stale_transition_hours: float = 26.0
+    transition_hours: float = 36.0
 
     # Notification
     discord_webhook_url: str = ""

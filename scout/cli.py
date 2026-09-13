@@ -20,7 +20,6 @@ from scout.events import EventLog
 from scout.github import GitHubClient, GitHubError, NotFound
 from scout.metrics import RepoHealth
 from scout.poll import poll_all
-from scout.probe import DEFAULT_MAX_PAGES
 from scout.probe import probe as run_probe
 from scout.safety import SafetyError, assert_enabled, assert_repo_cap
 
@@ -148,15 +147,14 @@ def _entry_from(health: RepoHealth, existing: watchlist.WatchedRepo | None, why:
 @app.command()
 def probe(
     repo: str,
-    save: bool = typer.Option(False, "--save", help="Add to the watchlist"),
     pages: int = typer.Option(
-        DEFAULT_MAX_PAGES, "--pages", help="Page budget. Raise it for very fast repos."
+        0, "--pages", help="Look deeper. Default comes from SCOUT_PROBE_PAGES."
     ),
 ):
     """Score one repository on whether it will merge work from a stranger."""
     with _client() as client:
         try:
-            health = run_probe(client, repo, max_pages=pages)
+            health = run_probe(client, repo, max_pages=pages or get_settings().probe_pages)
         except NotFound:
             console.print(f"[red]no such repository: {repo}[/]")
             raise typer.Exit(1) from None
@@ -166,26 +164,16 @@ def probe(
         console.print(_card(health))
         console.print(
             f"[dim]{client.points_spent} rate-limit points spent, "
-            f"{client.points_remaining} left this hour[/]"
+            f"{client.points_remaining} left this hour. `scout add` to keep it.[/]"
         )
-
-    if save:
-        book = watchlist.load()
-        book.upsert(_entry_from(health, book.find(health.full_name), ""))
-        watchlist.save(book)
-        console.print(f"[green]saved to {watchlist.path()}[/]")
 
 
 @app.command()
-def add(
-    repo: str,
-    why: str = typer.Option("", "--why", help="Why this one, in a sentence"),
-    pages: int = typer.Option(DEFAULT_MAX_PAGES, "--pages", help="Page budget"),
-):
+def add(repo: str, why: str = typer.Option("", "--why", help="Why this one, in a sentence")):
     """Probe a repository and put it on the watchlist."""
     with _client() as client:
         try:
-            health = run_probe(client, repo, max_pages=pages)
+            health = run_probe(client, repo, max_pages=get_settings().probe_pages)
         except NotFound:
             console.print(f"[red]no such repository: {repo}[/]")
             raise typer.Exit(1) from None
@@ -246,21 +234,16 @@ def list_repos():
 
 
 @app.command()
-def refresh(
-    revisit: bool = typer.Option(
-        False, "--revisit", help="Re-probe rejected repos too, and un-reject any that clear"
-    ),
-    pages: int = typer.Option(DEFAULT_MAX_PAGES, "--pages", help="Page budget per repo"),
-):
-    """Re-probe the watchlist and report verdict changes.
+def refresh():
+    """Re-probe every repository on the watchlist and report what changed.
 
-    Rejected repositories are skipped unless --revisit is given. That flag matters after
-    the scoring itself changes: a repo rejected by a rule that has since been corrected
-    would otherwise stay rejected forever, and the verdict that convicted it is exactly
-    the thing no longer trusted.
+    Everything, including rejected ones. A repo rejected by a scoring rule that has
+    since been corrected must be able to come back, and the verdict standing in its way
+    is exactly the one no longer trusted. At four points a repo against five thousand an
+    hour, there is nothing to save by skipping them.
     """
     book = watchlist.load()
-    live = [r for r in book.repo if revisit or r.status != "rejected"]
+    live = list(book.repo)
     if not live:
         console.print("[dim]nothing to refresh[/]")
         return
@@ -268,7 +251,7 @@ def refresh(
     with _client() as client:
         for entry in live:
             try:
-                health = run_probe(client, entry.full_name, max_pages=pages)
+                health = run_probe(client, entry.full_name, max_pages=get_settings().probe_pages)
             except GitHubError as exc:
                 console.print(f"[red]{entry.full_name}: {exc}[/]")
                 continue
@@ -407,11 +390,7 @@ def poll(
 
 
 @app.command()
-def digest(
-    send: bool = typer.Option(False, "--send", help="POST it to Discord"),
-    hours: float = typer.Option(36.0, "--hours", help="Window for transition alerts"),
-    limit: int = typer.Option(0, "--limit", help="Override digest size"),
-):
+def digest(send: bool = typer.Option(False, "--send", help="POST it to Discord")):
     """Build the evening digest from derived state. Prints it unless --send is given."""
     settings = get_settings()
     try:
@@ -430,14 +409,14 @@ def digest(
         abandoned_pr_days=settings.abandoned_pr_days,
         repos=repos,
     )
-    moves = derive.recent_transitions(state, within_hours=hours)
+    moves = derive.recent_transitions(state, within_hours=settings.transition_hours)
     titles = {s.key: (s.title, s.url) for s in state.subjects.values()}
 
     built = notify.build_digest(
         found,
         moves,
         sent=notify.already_sent(log.read()),
-        max_items=limit or settings.digest_max_items,
+        max_items=settings.digest_max_items,
         titles=titles,
     )
 
