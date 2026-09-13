@@ -330,7 +330,13 @@ def create_app() -> FastAPI:
 
     @app.get("/")
     def index() -> FileResponse:
-        return FileResponse(STATIC / "index.html")
+        # The whole dashboard is one file, so a cached copy survives an upgrade and shows
+        # yesterday's interface against today's API. Revalidate every load; it is a local
+        # server serving one small file.
+        return FileResponse(
+            STATIC / "index.html",
+            headers={"Cache-Control": "no-cache, must-revalidate"},
+        )
 
     @app.get("/docs")
     @app.get("/docs/{page}")
@@ -629,6 +635,7 @@ def _entry_from(
     entry.verdict_reasons = reasons
     entry.outsider_merge_rate = round(health.outsider_merge_rate.point, 3)
     entry.cold_merges = health.cold_merges
+    entry.newness_sufficient = health.newness_sufficient
     entry.newness_point = round(health.newness.point, 4)
     entry.newness_lower = round(health.newness.lower, 4)
     entry.maintainer_utc_offset = health.maintainer_utc_offset
