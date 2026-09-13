@@ -11,7 +11,6 @@ as a cron job, arguably more so, because it is easy to click twice.
 
 from __future__ import annotations
 
-import html
 import logging
 import threading
 from datetime import UTC, datetime
@@ -204,19 +203,81 @@ class IntentRequest(BaseModel):
     action: str
 
 
+# The docs live beside the package in a checkout and nowhere at all in a wheel, so look
+# in both rather than assuming one. A missing file is a readable page, not a 404 body.
+DOC_ROOTS = (
+    Path(__file__).resolve().parent.parent / "docs",
+    Path.cwd() / "docs",
+)
+
+
+def find_doc(name: str) -> Path | None:
+    safe = Path(name).name.removesuffix(".md")
+    for root in DOC_ROOTS:
+        candidate = root / f"{safe}.md"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def render_markdown(source: Path) -> str:
+    from markdown_it import MarkdownIt
+
+    text = source.read_text(encoding="utf-8")
+    rendered = MarkdownIt("commonmark", {"html": False}).enable("table").render(text)
+    # Relative links between the docs have to keep working once they are served as routes.
+    return rendered.replace('href="DECISIONS.md', 'href="/docs/DECISIONS').replace(
+        'href="DOCUMENTATION.md', 'href="/docs/DOCUMENTATION'
+    )
+
+
 DOCS_SHELL = """<!doctype html><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>scout - documentation</title>
+<title>scout - {title}</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;450;600&amp;display=swap">
 <style>
- body{{margin:0;background:#e9edef;color:#1b2733;
-   font:400 15px/1.6 "IBM Plex Sans",system-ui,sans-serif}}
- header{{background:#fcfdfd;border-bottom:1px solid #c6d1d8;padding:1rem 1.5rem}}
- header a{{color:#607281;text-decoration:none;border-bottom:1px solid #c6d1d8}}
- pre{{max-width:54rem;margin:2.5rem auto;padding:0 1.5rem 4rem;white-space:pre-wrap;
-   word-wrap:break-word;font:400 13.5px/1.65 "IBM Plex Mono",ui-monospace,monospace}}
+ :root{{--ground:#e9edef;--surface:#fcfdfd;--ink:#1b2733;--muted:#607281;--rule:#c6d1d8;
+   --rule-soft:#dde5e9;--accent:#37788a}}
+ *{{box-sizing:border-box}}
+ body{{margin:0;background:var(--ground);color:var(--ink);
+   font:400 15px/1.62 "IBM Plex Sans",system-ui,sans-serif}}
+ header{{background:var(--surface);border-bottom:1px solid var(--rule);
+   padding:1rem 1.5rem;display:flex;gap:1.5rem;align-items:baseline;
+   position:sticky;top:0}}
+ header a{{color:var(--muted);text-decoration:none;border-bottom:1px solid transparent}}
+ header a:hover{{color:var(--ink);border-bottom-color:var(--ink)}}
+ header .home{{font-weight:600;color:var(--ink)}}
+ article{{max-width:48rem;margin:0 auto;padding:2.5rem 1.5rem 6rem}}
+ h1{{font-size:1.83rem;letter-spacing:-0.02em;margin:0 0 1.5rem}}
+ h2{{font-size:1.37rem;margin:2.75rem 0 0.75rem;padding-top:1.25rem;
+   border-top:1px solid var(--rule)}}
+ h3{{font-size:1.1rem;margin:1.75rem 0 0.5rem}}
+ p,li{{max-width:42rem}}
+ a{{color:var(--accent)}}
+ code{{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:0.88em;
+   background:var(--surface);border:1px solid var(--rule-soft);border-radius:2px;
+   padding:0.08em 0.3em}}
+ pre{{background:var(--surface);border:1px solid var(--rule-soft);border-radius:3px;
+   padding:0.9rem 1.1rem;overflow-x:auto}}
+ pre code{{background:none;border:0;padding:0;font-size:0.84rem;line-height:1.55}}
+ table{{border-collapse:collapse;width:100%;margin:1.25rem 0;font-size:0.9375rem;
+   display:block;overflow-x:auto}}
+ th,td{{text-align:left;padding:0.5rem 0.85rem 0.5rem 0;
+   border-bottom:1px solid var(--rule-soft);vertical-align:top}}
+ th{{font-weight:600;border-bottom-color:var(--rule)}}
+ blockquote{{margin:1.25rem 0;padding:0.5rem 0 0.5rem 1rem;
+   border-left:2px solid var(--accent);color:var(--muted)}}
+ hr{{border:0;border-top:1px solid var(--rule);margin:2.5rem 0}}
+ /* A markdown rule already separates the section; the heading must not draw a second. */
+ hr + h2{{border-top:0;padding-top:0;margin-top:0}}
+ @media (max-width:640px){{article{{padding:1.75rem 1.1rem 4rem}}}}
 </style>
-<header><a href="/">&larr; Back to scout</a></header>
-<pre>{body}</pre>
+<header>
+  <a class="home" href="/">scout</a>
+  <a href="/docs/DOCUMENTATION">Documentation</a>
+  <a href="/docs/DECISIONS">Design decisions</a>
+</header>
+<article>{body}</article>
 """
 
 
@@ -272,17 +333,26 @@ def create_app() -> FastAPI:
         return FileResponse(STATIC / "index.html")
 
     @app.get("/docs")
-    def docs() -> HTMLResponse:
-        """Serve the documentation from disk, so it is the same file git tracks.
-
-        Rendered as plain markdown in a <pre> rather than pulling in a renderer - the
-        dashboard has no build step and is not going to grow one for this.
-        """
-        source = Path(__file__).resolve().parent.parent / "docs" / "DOCUMENTATION.md"
-        if not source.exists():
-            raise HTTPException(404, "docs/DOCUMENTATION.md is not in this checkout")
-        body = source.read_text(encoding="utf-8")
-        return HTMLResponse(DOCS_SHELL.format(body=html.escape(body)))
+    @app.get("/docs/{page}")
+    def docs(page: str = "DOCUMENTATION") -> HTMLResponse:
+        """Serve the markdown docs, rendered, from whichever copy is actually present."""
+        source = find_doc(page)
+        if source is None:
+            return HTMLResponse(
+                DOCS_SHELL.format(
+                    title="Documentation not found",
+                    body=(
+                        "<h1>No documentation in this install</h1><p>scout looked for "
+                        f"<code>docs/{page}.md</code> next to the package and in the "
+                        "working directory. Run the dashboard from a checkout, or read "
+                        "the docs on GitHub.</p>"
+                    ),
+                ),
+                status_code=404,
+            )
+        return HTMLResponse(
+            DOCS_SHELL.format(title=source.stem.title(), body=render_markdown(source))
+        )
 
     @app.get("/api/glossary")
     def glossary() -> dict[str, Any]:

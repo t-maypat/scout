@@ -160,11 +160,29 @@ class TestEveryRouteLoads:
     def test_the_app_constructs(self):
         assert server.create_app() is not None
 
-    def test_docs_are_served_from_the_tracked_file(self, client):
+    def test_docs_are_served_rendered_from_the_tracked_file(self, client):
         r = client.get("/docs")
         assert r.status_code == 200
-        assert "scout" in r.text
-        assert "Back to scout" in r.text
+        assert "<h1>" in r.text, "markdown should be rendered, not dumped as text"
+        assert "<table>" in r.text
+        assert "docs/DOCUMENTATION" in r.text
+
+    def test_both_documents_are_reachable(self, client):
+        for page in ("DOCUMENTATION", "DECISIONS"):
+            assert client.get(f"/docs/{page}").status_code == 200
+
+    def test_links_between_the_documents_are_rewritten_to_routes(self, client):
+        """DOCUMENTATION.md links to DECISIONS.md by filename, which is right on GitHub
+        and a dead link once the same file is served as a route."""
+        assert 'href="/docs/DECISIONS' in client.get("/docs").text
+
+    def test_a_missing_document_explains_itself_rather_than_404ing_blankly(self, client):
+        r = client.get("/docs/NOPE")
+        assert r.status_code == 404
+        assert "No documentation in this install" in r.text
+
+    def test_a_traversal_attempt_cannot_escape_the_docs_directory(self, client):
+        assert client.get("/docs/..%2f..%2fpyproject").status_code in (404, 400)
 
     def test_every_get_route_answers(self, client):
         for path in ("/", "/docs", "/api/glossary", "/api/overview", "/api/inbox"):
