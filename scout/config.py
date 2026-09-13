@@ -74,6 +74,16 @@ class Settings(BaseSettings):
 
     # Notification
     discord_webhook_url: str = ""
+    # A webhook created in Discord's UI is not owned by an application, and Discord
+    # ignores interactive components from those. Buttons therefore require the bot to
+    # post. Set both of these and scout posts as the bot; set neither and it falls back
+    # to the webhook, which works fine and simply has no buttons.
+    discord_bot_token: str = ""
+    discord_channel_id: str = ""
+
+    @property
+    def posts_as_bot(self) -> bool:
+        return bool(self.discord_bot_token and self.discord_channel_id)
     digest_hour_local: int = 20
     digest_max_items: int = 8
 

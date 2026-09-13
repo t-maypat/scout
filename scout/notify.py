@@ -1,8 +1,12 @@
 """The notifier: turn derived state into one Discord message.
 
 A channel webhook needs no bot, no OAuth and no application - you create it in Discord's
-UI and POST JSON at it. The bot only becomes necessary when buttons need to send
-something *back*, which is the interaction receiver, not this.
+UI and POST JSON at it. That is the whole setup for notifications.
+
+Buttons are a different matter. Discord ignores interactive components from a webhook
+that is not owned by an application, so a webhook made by hand in the UI can never carry
+them however it is called. Buttons require the bot to post, which is why there are two
+transports here: bot when a token and channel are configured, webhook otherwise.
 
 The rule this module exists to enforce: **polling often and interrupting often are
 different decisions.** The poller runs every fifteen minutes so the log is accurate. This
@@ -88,6 +92,42 @@ class Digest:
     @property
     def keys(self) -> list[str]:
         return [item.key for item in self.items]
+
+    def to_messages(self, with_buttons: bool = False) -> list[dict[str, Any]]:
+        """One message, or a header plus one per item when buttons are wanted.
+
+        Discord attaches components to a message rather than an embed, so there is no
+        way to put a different pair of buttons under each of eight embeds in one
+        message. Per-item actions mean per-item messages.
+        """
+        if not with_buttons:
+            return [self.to_discord()]
+
+        header = self.to_discord()["embeds"][0]
+        messages: list[dict[str, Any]] = [{"embeds": [header]}]
+        for item in self.items[: MAX_EMBEDS - 1]:
+            age = f" - idle {item.idle_days}d" if item.idle_days else ""
+            messages.append(
+                {
+                    "embeds": [
+                        {
+                            "title": _clip(
+                                f"{item.repo}#{item.number} - {item.title}", MAX_TITLE
+                            ),
+                            "url": item.url,
+                            "description": _clip(
+                                f"*{HEADLINES.get(item.kind, item.kind)}*{age}"
+                                + chr(10)
+                                + item.note,
+                                MAX_DESCRIPTION,
+                            ),
+                            "color": COLOURS.get(item.kind, 0x99AAB5),
+                        }
+                    ],
+                    "components": [buttons_for(item)],
+                }
+            )
+        return messages
 
     def to_discord(self) -> dict[str, Any]:
         """One message: a header embed, then one embed per item.
@@ -191,12 +231,83 @@ def sent_event(digest: Digest, channel: str = "discord") -> Event:
     )
 
 
-def post(webhook_url: str, payload: dict[str, Any], timeout: float = 15.0) -> None:
-    """POST to a Discord channel webhook. Raises on anything that is not a 2xx."""
-    if not webhook_url:
-        raise ValueError("no webhook url - set SCOUT_DISCORD_WEBHOOK_URL")
-    response = httpx.post(webhook_url, json=payload, timeout=timeout)
+LINK, PRIMARY, SECONDARY = 5, 1, 2
+ACTION_ROW, BUTTON = 1, 2
+API = "https://discord.com/api/v10"
+
+
+def buttons_for(item: Item) -> dict[str, Any]:
+    """One row of actions for one item.
+
+    Components attach to a message, not to an embed, so per-item buttons mean per-item
+    messages. That is why bot mode sends a header and then one message each rather than
+    a single digest - eight embeds in one message can only ever share one row.
+
+    The link button needs nothing listening: Discord opens the url itself. Only Later and
+    Not for me reach the interaction receiver.
+    """
+    return {
+        "type": ACTION_ROW,
+        "components": [
+            {"type": BUTTON, "style": LINK, "label": "Open on GitHub", "url": item.url},
+            {
+                "type": BUTTON,
+                "style": SECONDARY,
+                "label": "Later",
+                "custom_id": f"snooze:{item.repo}:{item.number}",
+            },
+            {
+                "type": BUTTON,
+                "style": SECONDARY,
+                "label": "Not for me",
+                "custom_id": f"dismiss:{item.repo}:{item.number}",
+            },
+        ],
+    }
+
+
+def post(
+    payload: dict[str, Any],
+    webhook_url: str = "",
+    bot_token: str = "",
+    channel_id: str = "",
+    timeout: float = 15.0,
+) -> None:
+    """Send one message, as the bot when configured and by webhook otherwise."""
+    if bot_token and channel_id:
+        response = httpx.post(
+            f"{API}/channels/{channel_id}/messages",
+            json=payload,
+            headers={"Authorization": f"Bot {bot_token}"},
+            timeout=timeout,
+        )
+    elif webhook_url:
+        response = httpx.post(webhook_url, json=payload, timeout=timeout)
+    else:
+        raise ValueError(
+            "nowhere to send - set SCOUT_DISCORD_WEBHOOK_URL, or a bot token and "
+            "channel id for buttons"
+        )
+
     if response.status_code == 429:
         retry = response.json().get("retry_after", "?")
         raise RuntimeError(f"discord rate limited, retry after {retry}s")
+    if response.status_code == 403:
+        raise RuntimeError(
+            "discord refused: the bot needs View Channel and Send Messages in that "
+            "channel, and the channel id must be the one it can see"
+        )
     response.raise_for_status()
+
+
+def send(
+    digest: Digest,
+    webhook_url: str = "",
+    bot_token: str = "",
+    channel_id: str = "",
+) -> int:
+    """Deliver a digest. Returns how many messages went out."""
+    messages = digest.to_messages(with_buttons=bool(bot_token and channel_id))
+    for message in messages:
+        post(message, webhook_url, bot_token, channel_id)
+    return len(messages)

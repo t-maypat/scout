@@ -255,12 +255,31 @@ Not beginner-labelled issues. Those are the most contested real estate on GitHub
 
 ## Discord
 
-Notifications need **no bot**. Server Settings → Integrations → Webhooks → New Webhook →
-Copy URL → `SCOUT_DISCORD_WEBHOOK_URL`.
+Two levels, and the second is not optional if you want buttons.
 
-A registered Discord application is only needed for buttons, which is `worker/` — a
-Cloudflare Worker that verifies the signature and forwards the intent to GitHub Actions.
-See [worker/README.md](../worker/README.md).
+### Notifications only — two minutes, no bot
+
+Server Settings → Integrations → Webhooks → New Webhook → Copy URL →
+`SCOUT_DISCORD_WEBHOOK_URL`. That is the whole setup.
+
+### Buttons — needs the bot to post
+
+A webhook you create in Discord's UI is **not owned by an application**, and Discord
+ignores interactive components from those: *"Non-application-owned webhooks cannot send
+interactive components."* No amount of formatting gets buttons onto a hand-made webhook's
+messages. The bot has to post them.
+
+Set `SCOUT_DISCORD_BOT_TOKEN` and `SCOUT_DISCORD_CHANNEL_ID` and scout posts as the bot
+instead, with an action row under each item. Leave them unset and it falls back to the
+webhook.
+
+One consequence worth knowing: **components attach to a message, not to an embed.** Eight
+embeds in one message could only ever share a single row of buttons, so bot mode sends a
+header message and then one message per item.
+
+The Later and Not for me buttons need something listening, which is `worker/` — a
+Cloudflare Worker that verifies Discord's signature and forwards the intent. Open on
+GitHub is a link button and needs nothing at all.
 
 ---
 

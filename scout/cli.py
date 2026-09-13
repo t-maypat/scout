@@ -478,12 +478,18 @@ def digest(send: bool = typer.Option(False, "--send", help="POST it to Discord")
         return
 
     try:
-        notify.post(settings.discord_webhook_url, built.to_discord())
+        messages = notify.send(
+            built,
+            webhook_url=settings.discord_webhook_url,
+            bot_token=settings.discord_bot_token,
+            channel_id=settings.discord_channel_id,
+        )
     except (ValueError, RuntimeError) as exc:
         console.print(f"[red]{exc}[/]")
         raise typer.Exit(1) from exc
     log.append([notify.sent_event(built)])
-    console.print(f"[green]sent {len(built.items)} items[/]")
+    how = "as the bot, with buttons" if settings.posts_as_bot else "by webhook"
+    console.print(f"[green]sent {len(built.items)} items {how}[/] ({messages} messages)")
 
 
 @app.command(name="events")
