@@ -71,6 +71,24 @@ class Settings(BaseSettings):
     log_level: str = "info"
 
     @property
+    def token(self) -> str:
+        """The token, without whatever whitespace an editor left on the line.
+
+        A trailing newline or space rides along into the Authorization header and GitHub
+        answers 401, which reads exactly like a wrong token and is not one.
+        """
+        return self.github_token.strip().strip("\"'")
+
+    @property
+    def token_kind(self) -> str:
+        token = self.token
+        if token.startswith("github_pat_"):
+            return "fine-grained"
+        if token.startswith(("ghp_", "gho_", "ghu_", "ghs_", "ghr_")):
+            return "classic"
+        return "unrecognised" if token else "missing"
+
+    @property
     def language_list(self) -> list[str]:
         return [x.strip() for x in self.languages.split(",") if x.strip()]
 
