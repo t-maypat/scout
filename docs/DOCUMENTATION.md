@@ -283,16 +283,24 @@ default authorization link"), so set **Installation → Install Link** to **None
 Open the generated URL; the correct screen says **Add to server** and asks which.
 
 A bot is always added to a whole server, never one channel. To confine it, give it no
-server-wide permissions at install and grant View Channel, Send Messages and Embed Links
-on `#scout` alone, as a channel permission override.
+server-wide permissions at install and grant these on `#scout` alone, as a channel
+permission override: **View Channel**, **Send Messages**, **Embed Links**, **Create Public
+Threads** and **Send Messages in Threads**.
 
 Set `SCOUT_DISCORD_BOT_TOKEN` and `SCOUT_DISCORD_CHANNEL_ID` and scout posts as the bot
 instead, with an action row under each item. Leave them unset and it falls back to the
 webhook.
 
-One consequence worth knowing: **components attach to a message, not to an embed.** Eight
-embeds in one message could only ever share a single row of buttons, so bot mode sends a
-header message and then one message per item.
+**Layout: one thread per repository per day.** Components attach to a message, not to an
+embed, so per-item buttons mean one message per item - which is a wall of messages if they
+all land in the channel. Instead the channel gets a single line per repository per day,
+such as `14 Sep - BerriAI/litellm (8)`, with a thread off it holding that repository's
+items in rank order. Sending again on the same day adds to the existing thread and
+updates the count rather than opening a second one; thread ids are kept in
+`state/discord_threads.json`. The day is taken in `SCOUT_DISPLAY_TZ`, not UTC.
+
+Webhook mode stays a single message: a plain webhook can neither start a thread in a text
+channel nor carry buttons.
 
 The Later and Not for me buttons need something listening, which is `worker/` — a
 Cloudflare Worker that verifies Discord's signature and forwards the intent. Open on

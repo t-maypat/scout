@@ -468,3 +468,116 @@ class TestTheStalestPage:
         state = derive.derive(result.events)
         found = derive.opportunities(state, now=NOW)
         assert [o.kind for o in found] == ["abandoned-pr"]
+
+
+class TestThreadPerRepoPerDay:
+    """Per-item buttons force per-item messages, which is a wall in the channel. So the
+    channel gets one line per repository per day, and each item goes in its thread."""
+
+    CH = "chan"
+
+    class FakeDiscord:
+        def __init__(self):
+            self.calls = []
+            self.next_id = 100
+
+        def __call__(self, method, path, payload=None):
+            self.calls.append((method, path, payload))
+            self.next_id += 1
+            return {"id": str(self.next_id)}
+
+    def item(self, repo, number):
+        return notify.Item(
+            f"{repo}#{number}:abandoned-pr", "abandoned-pr", repo, number,
+            f"thing {number}", f"https://github.com/{repo}/pull/{number}", "author gone", 40,
+        )
+
+    def day(self, d=14):
+        from datetime import date
+
+        return date(2026, 9, d)
+
+    def channel_posts(self, fake):
+        path = f"/channels/{self.CH}/messages"
+        return [c for c in fake.calls if c[0] == "POST" and c[1] == path]
+
+    def thread_creates(self, fake):
+        return [c for c in fake.calls if c[1].endswith("/threads")]
+
+    def test_the_channel_gets_one_line_per_repo_and_items_go_in_threads(self, tmp_path):
+        fake = self.FakeDiscord()
+        digest = notify.Digest(
+            items=[self.item("a/x", 1), self.item("b/y", 2), self.item("a/x", 3)]
+        )
+        sent = notify.send_threaded(digest, self.CH, fake, tmp_path / "t.json", self.day())
+        assert [h[2]["content"] for h in self.channel_posts(fake)] == [
+            "14 Sep - a/x (2)",
+            "14 Sep - b/y (1)",
+        ]
+        assert len(self.thread_creates(fake)) == 2
+        in_threads = [
+            c for c in fake.calls
+            if c[0] == "POST"
+            and c[1] != f"/channels/{self.CH}/messages"
+            and not c[1].endswith("/threads")
+        ]
+        assert len(in_threads) == 3
+        assert all("components" in c[2] for c in in_threads), "each item keeps its buttons"
+        assert sent == 5
+
+    def test_repos_are_ordered_by_their_best_item(self, tmp_path):
+        fake = self.FakeDiscord()
+        digest = notify.Digest(items=[self.item("b/y", 1), self.item("a/x", 2)])
+        notify.send_threaded(digest, self.CH, fake, tmp_path / "t.json", self.day())
+        assert self.channel_posts(fake)[0][2]["content"] == "14 Sep - b/y (1)"
+
+    def test_a_second_send_the_same_day_appends_instead_of_opening_another(self, tmp_path):
+        import json
+
+        state = tmp_path / "t.json"
+        notify.send_threaded(
+            notify.Digest(items=[self.item("a/x", 1)]), self.CH, self.FakeDiscord(),
+            state, self.day(),
+        )
+        thread = json.loads(state.read_text(encoding="utf-8"))["2026-09-14"]["a/x"]["thread"]
+
+        second = self.FakeDiscord()
+        notify.send_threaded(
+            notify.Digest(items=[self.item("a/x", 2), self.item("a/x", 3)]),
+            self.CH, second, state, self.day(),
+        )
+        assert self.channel_posts(second) == [], "no new header line"
+        assert self.thread_creates(second) == [], "no new thread"
+        assert len([c for c in second.calls if c[1] == f"/channels/{thread}/messages"]) == 2
+        patches = [c for c in second.calls if c[0] == "PATCH"]
+        assert patches and patches[0][2]["content"] == "14 Sep - a/x (3)"
+
+    def test_the_next_day_opens_a_new_thread(self, tmp_path):
+        state = tmp_path / "t.json"
+        notify.send_threaded(
+            notify.Digest(items=[self.item("a/x", 1)]), self.CH, self.FakeDiscord(),
+            state, self.day(14),
+        )
+        fake = self.FakeDiscord()
+        notify.send_threaded(
+            notify.Digest(items=[self.item("a/x", 2)]), self.CH, fake, state, self.day(15)
+        )
+        assert [h[2]["content"] for h in self.channel_posts(fake)] == ["15 Sep - a/x (1)"]
+
+    def test_old_days_are_pruned_from_state(self, tmp_path):
+        import json
+
+        state = tmp_path / "t.json"
+        for d in (1, 14):
+            notify.send_threaded(
+                notify.Digest(items=[self.item("a/x", d)]), self.CH, self.FakeDiscord(),
+                state, self.day(d),
+            )
+        assert list(json.loads(state.read_text(encoding="utf-8"))) == ["2026-09-14"]
+
+    def test_webhook_mode_still_sends_one_message(self, monkeypatch):
+        posted = []
+        monkeypatch.setattr(notify, "post", lambda payload, url="", *a, **k: posted.append(url))
+        digest = notify.Digest(items=[self.item("a/x", 1), self.item("b/y", 2)])
+        assert notify.send(digest, webhook_url="https://hook") == 1
+        assert posted == ["https://hook"]
