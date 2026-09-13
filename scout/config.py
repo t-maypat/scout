@@ -130,3 +130,28 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def unknown_env_keys(path: str = ".env") -> list[tuple[str, str | None]]:
+    """SCOUT_ variables in a .env file that no setting reads, with the nearest real name.
+
+    pydantic-settings ignores variables it does not recognise, which is right for the rest
+    of the environment and wrong for a typo. SCOUT_DICORD_BOT_TOKEN - one missing S -
+    loaded as nothing, and scout quietly fell back to the webhook with no buttons.
+    """
+    import difflib
+    import re
+    from pathlib import Path
+
+    file = Path(path)
+    if not file.is_file():
+        return []
+    known = sorted(name.upper() for name in Settings.model_fields)
+    found: list[tuple[str, str | None]] = []
+    text = file.read_text(encoding="utf-8")
+    for match in re.finditer(r"^\s*SCOUT_([A-Z0-9_]+)\s*=", text, re.MULTILINE):
+        key = match.group(1)
+        if key not in known:
+            close = difflib.get_close_matches(key, known, n=1, cutoff=0.8)
+            found.append((f"SCOUT_{key}", f"SCOUT_{close[0]}" if close else None))
+    return found

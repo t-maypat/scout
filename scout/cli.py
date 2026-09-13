@@ -460,13 +460,30 @@ def digest(send: bool = typer.Option(False, "--send", help="POST it to Discord")
     )
 
     if built.empty:
-        console.print(f"[dim]nothing new ({built.skipped} already sent)[/]")
+        # "nothing new" was true and useless: it looked the same whether the log was empty,
+        # nothing was green, or there was simply no work today.
+        if not state.subjects:
+            if not _poll_targets(book):
+                console.print(
+                    "[dim]nothing to send: no repository is green or active, so nothing has "
+                    "been polled. `scout mark <repo> green` first.[/]"
+                )
+            else:
+                console.print(
+                    "[dim]nothing to send: no observations in the log yet. "
+                    "Run `scout poll` first.[/]"
+                )
+        else:
+            console.print(
+                f"[dim]nothing new: {len(state.subjects):,} issues and PRs observed, "
+                f"no uncontested work found, {built.skipped} already sent[/]"
+            )
         return
 
     for item in built.items:
         console.print(
             f"[bold]{item.repo}#{item.number}[/] "
-            f"[dim]{notify.HEADLINES.get(item.kind, item.kind)}[/] — {item.title[:60]}"
+            f"[dim]{notify.HEADLINES.get(item.kind, item.kind)}[/] - {item.title[:60]}"
         )
         console.print(f"  [dim]{item.note}  {item.url}[/]")
     if built.skipped:
@@ -586,6 +603,42 @@ def serve(
     )
 
 
+def _check_discord_bot(settings) -> int:
+    """Validate the bot token and channel without posting anything. Returns failures."""
+    import httpx
+
+    base = "https://discord.com/api/v10"
+    headers = {"Authorization": f"Bot {settings.discord_bot_token}"}
+    try:
+        me = httpx.get(f"{base}/users/@me", headers=headers, timeout=15)
+        if me.status_code == 401:
+            console.print("discord: [red]bot token rejected[/] - reset it on the Bot tab")
+            return 1
+        me.raise_for_status()
+        name = me.json().get("username", "?")
+        channel = httpx.get(
+            f"{base}/channels/{settings.discord_channel_id}", headers=headers, timeout=15
+        )
+    except httpx.HTTPError as exc:
+        console.print(f"discord: [red]could not reach Discord[/]: {exc}")
+        return 1
+    if channel.status_code in (403, 404):
+        console.print(
+            f"discord: bot [bold]{name}[/] is valid but [red]cannot see channel "
+            f"{settings.discord_channel_id}[/] - allow View Channel and Send Messages on "
+            "that channel, or check the id"
+        )
+        return 1
+    if channel.is_success:
+        console.print(
+            f"discord: bot [bold]{name}[/] can see "
+            f"#{channel.json().get('name', '?')} - digests post with buttons"
+        )
+        return 0
+    console.print(f"discord: [red]unexpected {channel.status_code}[/] checking the channel")
+    return 1
+
+
 @app.command()
 def doctor(repo: str = typer.Option("", "--repo", help="Also try probing this one")):
     """Check the token, the budget, and the settings.
@@ -650,6 +703,13 @@ def doctor(repo: str = typer.Option("", "--repo", help="Also try probing this on
             "[dim]A classic token with the public_repo scope avoids both.[/]"
         )
 
+    from scout.config import unknown_env_keys
+
+    for key, suggestion in unknown_env_keys():
+        failures += 1
+        hint = f" - did you mean {suggestion}?" if suggestion else ""
+        console.print(f"[red]{key} in .env is not a setting, so it is being ignored[/]{hint}")
+
     log = _log()
     console.print(f"event log: {log.count():,} events in {len(log.shards())} shards")
     console.print(
@@ -658,7 +718,16 @@ def doctor(repo: str = typer.Option("", "--repo", help="Also try probing this on
         f"rate floor {settings.rate_limit_floor}"
     )
     hook = settings.discord_webhook_url
-    console.print(f"discord: {'webhook configured' if hook else '[yellow]no webhook set[/]'}")
+    if settings.posts_as_bot:
+        failures += _check_discord_bot(settings)
+    elif settings.discord_channel_id and not settings.discord_bot_token:
+        console.print(
+            "discord: [yellow]channel id set but no bot token[/] - posting by webhook, "
+            "so no buttons"
+        )
+    else:
+        state = "webhook configured, no buttons" if hook else "[yellow]nothing configured[/]"
+        console.print(f"discord: {state}")
     if failures:
         raise typer.Exit(1)
 
