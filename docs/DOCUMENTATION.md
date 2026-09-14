@@ -1,6 +1,7 @@
 # scout — documentation
 
-Everything you need to run it. For *why* it works the way it does, see
+Everything you need to run it. For how the pieces connect, see
+[ARCHITECTURE.md](ARCHITECTURE.md). For *why* it works the way it does, see
 [DECISIONS.md](DECISIONS.md).
 
 ---

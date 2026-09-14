@@ -5,12 +5,12 @@
 **Find open source projects that will actually merge your patch — then watch them for work nobody is racing for.**
 
 [![Python](https://img.shields.io/badge/python-3.12+-1b2733?logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-138%20passing-2c7a4b)](tests/)
+[![Tests](https://img.shields.io/badge/tests-212%20passing-2c7a4b)](tests/)
 [![Ruff](https://img.shields.io/badge/lint-ruff-37788a?logo=ruff&logoColor=white)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/badge/license-MIT-37788a)](LICENSE)
 [![GitHub access](https://img.shields.io/badge/GitHub_access-read--only-2c7a4b)](docs/DECISIONS.md#nothing-writes-to-github)
 
-[Documentation](docs/DOCUMENTATION.md) · [Design decisions](docs/DECISIONS.md) · [Quick start](#quick-start)
+[Documentation](docs/DOCUMENTATION.md) · [Architecture](docs/ARCHITECTURE.md) · [Design decisions](docs/DECISIONS.md) · [Quick start](#quick-start)
 
 </div>
 
@@ -97,7 +97,8 @@ every transition is derived by comparing consecutive snapshots. Event identity i
 seen rather than when you looked, so overlapping polls deduplicate themselves and running
 the poller twice writes nothing the second time.
 
-Architecture and reasoning: [docs/DECISIONS.md](docs/DECISIONS.md).
+How the pieces connect, with diagrams of each flow: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Why they are built that way: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Read-only, by construction
 
@@ -134,7 +135,7 @@ repository matters for the Actions allowance.
 uv run pytest
 ```
 
-138 tests, no network in any of them. Scoring is a pure function over recorded API
+212 tests, no network in any of them. Scoring is a pure function over recorded API
 responses, so every verdict is testable without a token and there are no cassettes to go
 stale.
 
