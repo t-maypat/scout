@@ -242,7 +242,7 @@ DOCS_SHELL = """<!doctype html><meta charset="utf-8">
  body{{margin:0;background:var(--ground);color:var(--ink);
    font:400 15px/1.62 "IBM Plex Sans",system-ui,sans-serif}}
  header{{background:var(--surface);border-bottom:1px solid var(--rule);
-   padding:1rem 1.5rem;display:flex;gap:1.5rem;align-items:baseline;
+   padding:1rem 1.5rem;display:flex;flex-wrap:wrap;gap:0.5rem 1.5rem;align-items:baseline;
    position:sticky;top:0}}
  header a{{color:var(--muted);text-decoration:none;border-bottom:1px solid transparent}}
  header a:hover{{color:var(--ink);border-bottom-color:var(--ink)}}
@@ -270,9 +270,13 @@ DOCS_SHELL = """<!doctype html><meta charset="utf-8">
  hr{{border:0;border-top:1px solid var(--rule);margin:2.5rem 0}}
  /* A markdown rule already separates the section; the heading must not draw a second. */
  hr + h2{{border-top:0;padding-top:0;margin-top:0}}
+ /* Diagrams are wider than prose. Squeezed into the text column their labels shrink to
+    half size, so they break out of it on wide screens and scroll on narrow ones instead. */
  .mermaid{{background:var(--surface);border:1px solid var(--rule-soft);border-radius:3px;
-   padding:1rem;margin:1.25rem 0;overflow-x:auto;text-align:center}}
- @media (max-width:640px){{article{{padding:1.75rem 1.1rem 4rem}}}}
+   padding:1rem;margin:1.5rem 0;overflow-x:auto;text-align:center;
+   width:min(calc(100vw - 3rem), 80rem);position:relative;left:50%;transform:translateX(-50%)}}
+ @media (max-width:640px){{article{{padding:1.75rem 1.1rem 4rem}}
+   header{{padding:0.75rem 1.1rem;gap:0.4rem 1rem}}}}
 </style>
 <header>
   <a class="home" href="/">scout</a>
@@ -295,7 +299,13 @@ DOCS_SHELL = """<!doctype html><meta charset="utf-8">
      box.textContent = code.textContent;
      code.parentElement.replaceWith(box);
    }}
-   mermaid.initialize({{ startOnLoad: false, theme: "neutral" }});
+   // Natural size, never scaled down to fit: an unreadable diagram is worse than a scrollbar.
+   mermaid.initialize({{
+     startOnLoad: false,
+     theme: "neutral",
+     flowchart: {{ useMaxWidth: false }},
+     sequence: {{ useMaxWidth: false }},
+   }});
    await mermaid.run({{ querySelector: ".mermaid" }});
  }}
 </script>
