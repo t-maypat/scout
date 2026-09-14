@@ -198,3 +198,17 @@ def test_the_dashboard_is_not_cached_across_upgrades(client):
     against today's API."""
     cache = client.get("/").headers.get("cache-control", "")
     assert "no-cache" in cache
+
+
+def test_architecture_doc_is_served_with_diagrams(client):
+    r = client.get("/docs/ARCHITECTURE")
+    assert r.status_code == 200
+    assert 'class="language-mermaid"' in r.text, "diagrams reach the page as mermaid blocks"
+    assert "mermaid.esm.min.mjs" in r.text, "and the page loads something to draw them"
+
+
+def test_every_doc_links_to_the_others_as_routes(client):
+    for page in ("DOCUMENTATION", "DECISIONS", "ARCHITECTURE"):
+        body = client.get(f"/docs/{page}").text
+        for name in ("DOCUMENTATION", "DECISIONS", "ARCHITECTURE"):
+            assert f'href="{name}.md' not in body, f"{page} links to {name}.md as a file"

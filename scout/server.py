@@ -226,9 +226,9 @@ def render_markdown(source: Path) -> str:
     text = source.read_text(encoding="utf-8")
     rendered = MarkdownIt("commonmark", {"html": False}).enable("table").render(text)
     # Relative links between the docs have to keep working once they are served as routes.
-    return rendered.replace('href="DECISIONS.md', 'href="/docs/DECISIONS').replace(
-        'href="DOCUMENTATION.md', 'href="/docs/DOCUMENTATION'
-    )
+    for name in ("DECISIONS", "DOCUMENTATION", "ARCHITECTURE"):
+        rendered = rendered.replace(f'href="{name}.md', f'href="/docs/{name}')
+    return rendered
 
 
 DOCS_SHELL = """<!doctype html><meta charset="utf-8">
@@ -270,14 +270,35 @@ DOCS_SHELL = """<!doctype html><meta charset="utf-8">
  hr{{border:0;border-top:1px solid var(--rule);margin:2.5rem 0}}
  /* A markdown rule already separates the section; the heading must not draw a second. */
  hr + h2{{border-top:0;padding-top:0;margin-top:0}}
+ .mermaid{{background:var(--surface);border:1px solid var(--rule-soft);border-radius:3px;
+   padding:1rem;margin:1.25rem 0;overflow-x:auto;text-align:center}}
  @media (max-width:640px){{article{{padding:1.75rem 1.1rem 4rem}}}}
 </style>
 <header>
   <a class="home" href="/">scout</a>
   <a href="/docs/DOCUMENTATION">Documentation</a>
   <a href="/docs/DECISIONS">Design decisions</a>
+  <a href="/docs/ARCHITECTURE">Architecture</a>
 </header>
 <article>{body}</article>
+<script type="module">
+ // Diagrams are fenced mermaid blocks in the markdown, which GitHub renders natively. Here
+ // they arrive as code blocks, so swap each for a container mermaid can draw into.
+ const blocks = document.querySelectorAll("pre > code.language-mermaid");
+ if (blocks.length) {{
+   const {{ default: mermaid }} = await import(
+     "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs"
+   );
+   for (const code of blocks) {{
+     const box = document.createElement("div");
+     box.className = "mermaid";
+     box.textContent = code.textContent;
+     code.parentElement.replaceWith(box);
+   }}
+   mermaid.initialize({{ startOnLoad: false, theme: "neutral" }});
+   await mermaid.run({{ querySelector: ".mermaid" }});
+ }}
+</script>
 """
 
 
