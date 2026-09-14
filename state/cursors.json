@@ -1,10 +1,10 @@
 {
   "repo": {
     "BerriAI/litellm": {
-      "etag": "W/\"12e219d560646298c0649539a43822f2f721bfb3f962d9a660ac3f9af04325b2\"",
+      "etag": "W/\"0e76c681090c12c1c28c5f94ac7633bafddaaf03e8c3d2dc8dc5004201801e80\"",
       "stale_etag": "W/\"f6cedad406892b3283b0c231f3f31a1182117eb3af98b29ca440f0cb80047265\"",
-      "watermark": "2026-09-14T16:56:20Z",
-      "last_polled": "2026-09-14T16:56:34.899990Z",
+      "watermark": "2026-09-14T20:41:12Z",
+      "last_polled": "2026-09-14T20:41:38.360150Z",
       "quiet_polls": 0
     }
   }
