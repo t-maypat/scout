@@ -235,6 +235,13 @@ dashboard writes the same kind of event, so the two never disagree.
   `SCOUT_DISPLAY_TZ`, and thread ids are kept in `state/discord_threads.json` for a week.
 - **By webhook** (no bot configured): a single message with every item as an embed and no
   buttons.
+- **Paced either way.** Discord limits bursts per channel and publishes no numbers for it,
+  so requests go a second apart, a bucket Discord reports empty is waited out, and a 429 is
+  retried after the wait it names. Every wait is capped at 5 seconds and the whole send at
+  120, so a long limit fails the run rather than hanging it.
+- **A send that stops partway** records the items that did go out as sent, and the
+  workflow commits that and the thread ids even though the run fails. The next run
+  finishes in the same thread instead of repeating them.
 
 **Writes:** a `notification_sent` event to the log, and `state/discord_threads.json`.
 
@@ -317,6 +324,9 @@ running either locally.
 | Rate-limit floor | stop with 500 requests left | `SCOUT_RATE_LIMIT_FLOOR` |
 | Watched repositories | at most 25 | `SCOUT_MAX_POLL_REPOS` |
 | Items per digest | 8 | `SCOUT_DIGEST_MAX_ITEMS` |
+| Discord pacing | 1 second between requests | `SEND_INTERVAL` in `notify.py` |
+| Discord waits | at most 5 seconds each, 3 retries on a 429 | `MAX_RATE_LIMIT_WAIT`, `RATE_LIMIT_RETRIES` |
+| Digest send deadline | 120 seconds | `SEND_DEADLINE` |
 | "Just came free" window | 36 hours | `SCOUT_TRANSITION_HOURS` |
 | Thread auto-archive | 24 hours | fixed |
 | Workflow job timeout | 10 minutes | the workflow files |

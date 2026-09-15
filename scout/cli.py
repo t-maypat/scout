@@ -503,6 +503,20 @@ def digest(send: bool = typer.Option(False, "--send", help="POST it to Discord")
             state_dir=settings.state_dir,
             tz=settings.display_tz,
         )
+    except notify.SendFailed as exc:
+        console.print(f"[red]{exc}[/]")
+        went = built.only(exc.delivered)
+        if not went.empty:
+            # Recorded, or the next digest sends these again. digest.yml commits this even
+            # though the step fails.
+            log.append([notify.sent_event(went)])
+            console.print(
+                f"[yellow]{len(went.items)} of {len(built.items)} reached Discord before it "
+                "stopped, recorded as sent:[/]"
+            )
+            for item in went.items:
+                console.print(f"  [dim]{item.repo}#{item.number}[/]")
+        raise typer.Exit(1) from exc
     except (ValueError, RuntimeError) as exc:
         console.print(f"[red]{exc}[/]")
         raise typer.Exit(1) from exc

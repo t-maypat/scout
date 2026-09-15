@@ -371,3 +371,4 @@ Kept deliberately, because the reasoning is more useful than a clean history.
 | Probing on every detail-view open | Spent rate limit on a click, silently | Reads the cached probe; re-probing is a button |
 | Request models inside `create_app()` | `from __future__ import annotations` made their hints unresolvable; every POST answered `422` | Hoisted to module scope |
 | Per-request timeouts only | Bounded one request, not an operation that makes nine | A deadline over the whole operation |
+| Digest requests sent back to back, failing on the first 429 | Tripped Discord's per-channel bucket on the seventh item with 0.3s to wait. The record step then skipped on failure, so six delivered items went unrecorded and their thread id was lost | One second between requests, capped retries, a send deadline, partial sends recorded, and a record step that always runs |
