@@ -581,3 +581,158 @@ class TestThreadPerRepoPerDay:
         digest = notify.Digest(items=[self.item("a/x", 1), self.item("b/y", 2)])
         assert notify.send(digest, webhook_url="https://hook") == 1
         assert posted == ["https://hook"]
+
+    def limited_after(self, fake, items):
+        """A Discord that rate limits once `items` item messages have gone in."""
+
+        def call(method, path, payload=None):
+            if len([c for c in fake.calls if "components" in (c[2] or {})]) == items:
+                raise RuntimeError("discord rate limited, retry after 0.3s")
+            return fake(method, path, payload)
+
+        return call
+
+    def test_a_send_that_stops_partway_names_what_went_out(self, tmp_path):
+        """The seventh of eight items hit a rate limit. Six were in Discord and nothing
+        said so, so the next digest would have sent all six again."""
+        import json
+
+        state = tmp_path / "t.json"
+        digest = notify.Digest(items=[self.item("a/x", n) for n in (1, 2, 3)])
+        with pytest.raises(notify.SendFailed, match="rate limited") as failed:
+            notify.send_threaded(
+                digest, self.CH, self.limited_after(self.FakeDiscord(), 2), state, self.day()
+            )
+        assert failed.value.delivered == ["a/x#1:abandoned-pr", "a/x#2:abandoned-pr"]
+        entry = json.loads(state.read_text(encoding="utf-8"))["2026-09-14"]["a/x"]
+        assert entry["thread"] and entry["count"] == 2
+
+    def test_finishing_a_partial_send_reuses_its_thread_and_fixes_the_count(self, tmp_path):
+        state = tmp_path / "t.json"
+        with pytest.raises(notify.SendFailed):
+            notify.send_threaded(
+                notify.Digest(items=[self.item("a/x", n) for n in (1, 2, 3)]),
+                self.CH, self.limited_after(self.FakeDiscord(), 2), state, self.day(),
+            )
+        retry = self.FakeDiscord()
+        notify.send_threaded(
+            notify.Digest(items=[self.item("a/x", 3)]), self.CH, retry, state, self.day()
+        )
+        assert self.channel_posts(retry) == [] and self.thread_creates(retry) == []
+        patches = [c for c in retry.calls if c[0] == "PATCH"]
+        assert patches and patches[0][2]["content"] == "14 Sep - a/x (3)"
+
+    def test_only_what_was_delivered_is_recorded_as_sent(self):
+        digest = notify.Digest(items=[self.item("a/x", n) for n in (1, 2, 3)])
+        went = digest.only(["a/x#1:abandoned-pr"])
+        assert went.generated_at == digest.generated_at
+        assert notify.already_sent([notify.sent_event(went)]) == {"a/x#1:abandoned-pr"}
+
+
+class TestDiscordPacing:
+    """Discord publishes no per-route limits, so pacing reads what responses say - and
+    every wait it takes is capped, because the number is chosen by the other side."""
+
+    class Clock:
+        def __init__(self):
+            self.now = 0.0
+            self.slept = []
+
+        def __call__(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.slept.append(seconds)
+            self.now += seconds
+
+    def pacing(self, clock, **kw):
+        return notify.Pacing(sleep=clock.sleep, clock=clock, **kw)
+
+    @staticmethod
+    def response(status=200, body=None, headers=None):
+        import httpx
+
+        return httpx.Response(
+            status,
+            json=body if body is not None else {},
+            headers=headers or {},
+            request=httpx.Request("POST", f"{notify.API}/channels/t/messages"),
+        )
+
+    def empty_bucket(self, reset_after):
+        return self.response(headers={
+            "X-RateLimit-Remaining": "0", "X-RateLimit-Reset-After": str(reset_after),
+        })
+
+    def test_a_short_rate_limit_is_waited_out_and_retried(self):
+        clock = self.Clock()
+        replies = iter([self.response(429, {"retry_after": 0.3}), self.response(200)])
+        got = self.pacing(clock).request("r", lambda: next(replies))
+        assert got.status_code == 200
+        assert clock.slept == [0.3]
+
+    def test_a_long_rate_limit_fails_at_once_rather_than_sleeping_the_cap(self):
+        """Five seconds against a sixty-second limit only earns another 429, and 429s
+        count toward Discord's invalid-request ban."""
+        clock = self.Clock()
+        with pytest.raises(RuntimeError, match="retry after 60s"):
+            self.pacing(clock).request("r", lambda: self.response(429, {"retry_after": 60}))
+        assert clock.slept == []
+
+    def test_a_rate_limit_with_no_usable_wait_is_not_guessed(self):
+        clock = self.Clock()
+        with pytest.raises(RuntimeError, match=r"retry after \?s"):
+            self.pacing(clock).request("r", lambda: self.response(429, {}))
+        assert clock.slept == []
+
+    def test_retries_are_limited(self):
+        clock = self.Clock()
+        calls = []
+
+        def always_limited():
+            calls.append(1)
+            return self.response(429, {"retry_after": 0.5})
+
+        with pytest.raises(RuntimeError, match="rate limited"):
+            self.pacing(clock).request("r", always_limited)
+        assert len(calls) == notify.RATE_LIMIT_RETRIES + 1
+
+    def test_consecutive_requests_are_spaced(self):
+        clock = self.Clock()
+        pacing = self.pacing(clock)
+        for _ in range(3):
+            pacing.request("r", lambda: self.response())
+        assert clock.slept == [notify.SEND_INTERVAL] * 2
+
+    def test_an_empty_bucket_is_waited_out_before_that_route_is_asked_again(self):
+        clock = self.Clock()
+        pacing = self.pacing(clock, interval=0)
+        pacing.request("POST /channels/t/messages", lambda: self.empty_bucket(2.5))
+        pacing.request("POST /channels/other/messages", lambda: self.response())
+        assert clock.slept == [], "another channel is another bucket"
+        pacing.request("POST /channels/t/messages", lambda: self.response())
+        assert clock.slept == [2.5]
+
+    def test_a_bucket_wait_is_capped(self):
+        clock = self.Clock()
+        pacing = self.pacing(clock, interval=0)
+        pacing.request("r", lambda: self.empty_bucket(3600))
+        pacing.request("r", lambda: self.response())
+        assert clock.slept == [notify.MAX_RATE_LIMIT_WAIT]
+
+    def test_no_wait_runs_past_the_deadline(self):
+        """The job is killed at ten minutes and the step after the send has to commit
+        what went out, so the send gives up rather than being killed mid-sleep."""
+        clock = self.Clock()
+        pacing = self.pacing(clock, deadline=10)
+        clock.now = 9.5
+        with pytest.raises(RuntimeError, match="deadline"):
+            pacing.request("r", lambda: self.response(429, {"retry_after": 1}))
+
+    def test_the_bot_transport_retries_through_the_pacing(self, monkeypatch):
+        clock = self.Clock()
+        replies = iter([self.response(429, {"retry_after": 0.3}), self.response(200, {"id": "9"})])
+        monkeypatch.setattr(notify.httpx, "request", lambda *a, **k: next(replies))
+        call = notify.bot_request("token", pacing=self.pacing(clock))
+        assert call("POST", "/channels/t/messages", {}) == {"id": "9"}
+        assert clock.slept == [0.3]

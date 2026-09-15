@@ -18,6 +18,7 @@ which is why the hot path is deliberately narrow.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -93,6 +94,15 @@ class Digest:
     @property
     def keys(self) -> list[str]:
         return [item.key for item in self.items]
+
+    def only(self, keys: Iterable[str]) -> Digest:
+        """This digest cut down to these keys - what to record when a send stops partway."""
+        wanted = set(keys)
+        return Digest(
+            items=[item for item in self.items if item.key in wanted],
+            skipped=self.skipped,
+            generated_at=self.generated_at,
+        )
 
     def to_messages(self, with_buttons: bool = False) -> list[dict[str, Any]]:
         """One message, or a header plus one per item when buttons are wanted.
@@ -216,6 +226,117 @@ LINK, PRIMARY, SECONDARY = 5, 1, 2
 ACTION_ROW, BUTTON = 1, 2
 API = "https://discord.com/api/v10"
 
+# Discord publishes a global limit - 50 requests a second - but no per-route numbers, and
+# says not to hard-code them: the response headers are the only authority. A digest is
+# about ten requests once a day, so all of these can afford to be conservative.
+#
+# Between consecutive requests. Eight items posted into one thread back to back is what
+# tripped the per-channel bucket; a second apiece costs ten seconds a day.
+SEND_INTERVAL = 1.0
+# The longest single wait scout takes on Discord's word, whether from `retry_after` or an
+# empty bucket's reset. Like GitHub's `retry-after` it is a number the other side chooses,
+# so it is capped rather than honoured literally.
+MAX_RATE_LIMIT_WAIT = 5.0
+# How many 429s one request may answer with a wait before scout gives up on it.
+RATE_LIMIT_RETRIES = 3
+# Over a whole send. The Actions job is killed at ten minutes and the step after the send
+# has to commit what went out, so a send must fail long before the runner is killed.
+SEND_DEADLINE = 120.0
+
+
+class SendFailed(RuntimeError):
+    """A send that stopped partway, carrying the keys of the items that reached Discord.
+
+    Without them nothing records those items, and the next digest sends them again.
+    """
+
+    def __init__(self, message: str, delivered: Iterable[str] = ()) -> None:
+        super().__init__(message)
+        self.delivered = list(delivered)
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """The wait Discord asked for, or None when it did not say in a usable way."""
+    try:
+        return float(response.json()["retry_after"])
+    except (ValueError, KeyError, TypeError):
+        pass
+    try:
+        return float(response.headers["retry-after"])
+    except (KeyError, ValueError):
+        return None
+
+
+class Pacing:
+    """Spacing, bucket waits and 429 retries for one send, every one of them bounded.
+
+    Three layers, cheapest first. A fixed interval stops a burst from forming. A bucket
+    Discord has reported empty (`X-RateLimit-Remaining: 0`) is waited out before that route
+    is asked again. A 429 that gets past both is retried after the `retry_after` it names.
+    No wait exceeds MAX_RATE_LIMIT_WAIT and none may run past the deadline: a send that
+    cannot finish in time fails and says so, rather than sitting on the runner.
+    """
+
+    def __init__(
+        self,
+        interval: float = SEND_INTERVAL,
+        deadline: float = SEND_DEADLINE,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.interval = interval
+        self.deadline_seconds = deadline
+        self._sleep = sleep
+        self._clock = clock
+        self._deadline = clock() + deadline
+        self._last: float | None = None
+        # Route -> when its bucket refills. Keyed by method and path, because the channel
+        # id in the path is what Discord scopes a message bucket to.
+        self._refills: dict[str, float] = {}
+
+    def _wait(self, seconds: float, why: str) -> None:
+        seconds = min(seconds, MAX_RATE_LIMIT_WAIT)
+        if seconds <= 0:
+            return
+        if self._clock() + seconds > self._deadline:
+            raise RuntimeError(
+                f"discord send would pass its {self.deadline_seconds:.0f}s deadline {why}"
+            )
+        self._sleep(seconds)
+
+    def _note_bucket(self, route: str, response: httpx.Response) -> None:
+        if response.headers.get("x-ratelimit-remaining") != "0":
+            return
+        try:
+            reset_after = float(response.headers["x-ratelimit-reset-after"])
+        except (KeyError, ValueError):
+            return
+        self._refills[route] = self._clock() + reset_after
+
+    def request(self, route: str, send: Callable[[], httpx.Response]) -> httpx.Response:
+        """Make one request through the pacing. Returns the first response that is not 429."""
+        if self._last is not None:
+            self._wait(self._last + self.interval - self._clock(), "between requests")
+        refill = self._refills.pop(route, None)
+        if refill is not None:
+            self._wait(refill - self._clock(), "waiting for an empty bucket to refill")
+
+        attempt = 0
+        while True:
+            response = send()
+            self._last = self._clock()
+            self._note_bucket(route, response)
+            if response.status_code != 429:
+                return response
+            wait = _retry_after(response)
+            # Sleeping the cap against a longer limit only earns another 429, and each
+            # one counts toward Discord's invalid-request ban. Fail instead.
+            if wait is None or wait > MAX_RATE_LIMIT_WAIT or attempt >= RATE_LIMIT_RETRIES:
+                shown = "?" if wait is None else f"{wait:g}"
+                raise RuntimeError(f"discord rate limited, retry after {shown}s")
+            self._wait(wait, "waiting out a rate limit")
+            attempt += 1
+
 
 def buttons_for(item: Item) -> dict[str, Any]:
     """One row of actions for one item.
@@ -253,26 +374,26 @@ def post(
     bot_token: str = "",
     channel_id: str = "",
     timeout: float = 15.0,
+    pacing: Pacing | None = None,
 ) -> None:
     """Send one message, as the bot when configured and by webhook otherwise."""
+    pacing = pacing or Pacing()
     if bot_token and channel_id:
-        response = httpx.post(
-            f"{API}/channels/{channel_id}/messages",
-            json=payload,
-            headers={"Authorization": f"Bot {bot_token}"},
-            timeout=timeout,
-        )
+        route = f"POST /channels/{channel_id}/messages"
+        url = f"{API}/channels/{channel_id}/messages"
+        headers = {"Authorization": f"Bot {bot_token}"}
     elif webhook_url:
-        response = httpx.post(webhook_url, json=payload, timeout=timeout)
+        # Not the url: it carries the webhook's token.
+        route, url, headers = "POST webhook", webhook_url, {}
     else:
         raise ValueError(
             "nowhere to send - set SCOUT_DISCORD_WEBHOOK_URL, or a bot token and "
             "channel id for buttons"
         )
 
-    if response.status_code == 429:
-        retry = response.json().get("retry_after", "?")
-        raise RuntimeError(f"discord rate limited, retry after {retry}s")
+    response = pacing.request(
+        route, lambda: httpx.post(url, json=payload, headers=headers, timeout=timeout)
+    )
     if response.status_code == 403:
         raise RuntimeError(
             "discord refused: the bot needs View Channel and Send Messages in that "
@@ -319,20 +440,21 @@ THREAD_STATE_DAYS = 7
 Request = Callable[[str, str, dict[str, Any] | None], dict[str, Any]]
 
 
-def bot_request(token: str, timeout: float = 15.0) -> Request:
-    """Authenticated calls to Discord's API as the bot, with the failures named."""
+def bot_request(token: str, timeout: float = 15.0, pacing: Pacing | None = None) -> Request:
+    """Authenticated calls to Discord's API as the bot, paced, with the failures named."""
+    pacing = pacing or Pacing()
 
     def call(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        response = httpx.request(
-            method,
-            f"{API}{path}",
-            json=payload,
-            headers={"Authorization": f"Bot {token}"},
-            timeout=timeout,
+        response = pacing.request(
+            f"{method} {path}",
+            lambda: httpx.request(
+                method,
+                f"{API}{path}",
+                json=payload,
+                headers={"Authorization": f"Bot {token}"},
+                timeout=timeout,
+            ),
         )
-        if response.status_code == 429:
-            retry = response.json().get("retry_after", "?")
-            raise RuntimeError(f"discord rate limited, retry after {retry}s")
         if response.status_code == 403:
             raise RuntimeError(
                 "discord refused: on the scout channel the bot needs View Channel, Send "
@@ -370,47 +492,57 @@ def send_threaded(
     The channel itself gets a single line per repository per day, so it reads as a
     list of days and projects rather than a wall of items. A second send on the same
     day adds to that repository's existing thread and updates the count on its header
-    instead of starting another. State is saved as soon as a thread exists, so a
-    failure halfway through the items cannot leave a second thread behind on retry.
+    instead of starting another. State is saved as soon as a thread exists, and again
+    when a send fails, so a retry finishes in the same thread. That only holds if the
+    state is committed, which is why digest.yml records even after a failed send.
+
+    A failure partway raises SendFailed naming the items that did go out.
     """
     label = today.strftime("%d %b")
     threads = _load_threads(state_file)
     todays = threads.setdefault(today.isoformat(), {})
     sent = 0
+    delivered: list[str] = []
 
-    for repo, items in by_repo(digest.items).items():
-        entry = todays.get(repo)
-        if entry is None:
-            header = request(
-                "POST",
-                f"/channels/{channel_id}/messages",
-                {"content": f"{label} - {repo} ({len(items)})"},
-            )
-            thread = request(
-                "POST",
-                f"/channels/{channel_id}/messages/{header['id']}/threads",
-                {
-                    "name": _clip(f"{label} - {repo}", 100),
-                    "auto_archive_duration": THREAD_ARCHIVE_MINUTES,
-                },
-            )
-            entry = {"thread": thread["id"], "header": header["id"], "count": 0}
-            todays[repo] = entry
-            sent += 1
+    try:
+        for repo, items in by_repo(digest.items).items():
+            entry = todays.get(repo)
+            if entry is None:
+                header = request(
+                    "POST",
+                    f"/channels/{channel_id}/messages",
+                    {"content": f"{label} - {repo} ({len(items)})"},
+                )
+                thread = request(
+                    "POST",
+                    f"/channels/{channel_id}/messages/{header['id']}/threads",
+                    {
+                        "name": _clip(f"{label} - {repo}", 100),
+                        "auto_archive_duration": THREAD_ARCHIVE_MINUTES,
+                    },
+                )
+                entry = {"thread": thread["id"], "header": header["id"], "count": 0}
+                todays[repo] = entry
+                sent += 1
+                _save_threads(state_file, threads, today)
+
+            for item in items:
+                request("POST", f"/channels/{entry['thread']}/messages", item_message(item))
+                delivered.append(item.key)
+                # Per item, so a send that stops partway leaves a count the retry can fix.
+                entry["count"] = int(entry.get("count", 0)) + 1
+                sent += 1
+
+            if entry["count"] != len(items):
+                request(
+                    "PATCH",
+                    f"/channels/{channel_id}/messages/{entry['header']}",
+                    {"content": f"{label} - {repo} ({entry['count']})"},
+                )
             _save_threads(state_file, threads, today)
-
-        for item in items:
-            request("POST", f"/channels/{entry['thread']}/messages", item_message(item))
-            sent += 1
-
-        entry["count"] = int(entry.get("count", 0)) + len(items)
-        if entry["count"] != len(items):
-            request(
-                "PATCH",
-                f"/channels/{channel_id}/messages/{entry['header']}",
-                {"content": f"{label} - {repo} ({entry['count']})"},
-            )
+    except (RuntimeError, httpx.HTTPError) as exc:
         _save_threads(state_file, threads, today)
+        raise SendFailed(str(exc), delivered) from exc
 
     return sent
 

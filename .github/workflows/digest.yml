@@ -48,7 +48,10 @@ jobs:
           fi
 
       - name: Record what was sent
-        if: ${{ inputs.dry_run != true }}
+        # always(): a send that fails partway has still posted items and saved the thread
+        # ids. Skipping this on failure threw both away, so the next run opened a second
+        # thread and sent those items again. The job still reports the send as failed.
+        if: ${{ always() && inputs.dry_run != true }}
         run: |
           if [ -z "$(git status --porcelain events state)" ]; then exit 0; fi
           git config user.name "scout"
