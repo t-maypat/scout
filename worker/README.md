@@ -32,3 +32,19 @@ and a 401 for a bad signature, so a successful save means verification works.
 
 `snooze` and `dismiss` are answered inline and picked up by the next poll. `claim` and
 `dispatch` queue an Actions run. Nothing here writes to GitHub on your behalf.
+
+## Check now
+
+Thread headers carry one control button, whose id has no item number:
+
+`poll:<owner>/<repo>` — for example `poll:BerriAI/litellm`.
+
+It dispatches `now.yml`, which polls, enriches and sends whatever is new. It exists
+because scheduled runs are late: measured on this repository, polls land 1 to 6 hours
+apart and a 14:30 UTC digest committed at 18:2x. GitHub documents that schedules are
+delayed under load and that queued jobs may be dropped, so the schedule is a floor and
+this button is how you ask for an answer now.
+
+The reply is ephemeral and immediate; the run takes a minute or two and posts into the
+same day threads. As with every other button, the Worker only queues a job — the job runs
+the same read-only code path as the cron.

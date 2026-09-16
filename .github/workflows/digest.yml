@@ -32,6 +32,15 @@ jobs:
 
       - run: uv sync --frozen
 
+      - name: Enrich this week's unassigned issues
+        # What the listing cannot say: whether a pull request is already linked, and who
+        # has spoken up in the comments. Candidates only, so a handful of requests.
+        # continue-on-error: a digest built on slightly older enrichment beats no digest.
+        continue-on-error: true
+        env:
+          SCOUT_GITHUB_TOKEN: ${{ secrets.SCOUT_GITHUB_TOKEN }}
+        run: uv run scout enrich
+
       - name: Build and send
         env:
           SCOUT_GITHUB_TOKEN: ${{ secrets.SCOUT_GITHUB_TOKEN }}

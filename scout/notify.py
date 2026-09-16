@@ -42,6 +42,7 @@ COLOURS = {
     "stale-assignment": 0xE67E22,
     "abandoned-pr": 0x9B59B6,
     "ready_for_review": 0x4F8EF7,
+    "fresh-and-free": 0x1ABC9C,
 }
 
 HEADLINES = {
@@ -50,7 +51,16 @@ HEADLINES = {
     "stale-assignment": "assigned, then abandoned",
     "abandoned-pr": "half-finished, author gone",
     "ready_for_review": "left draft",
+    "fresh-and-free": "fresh, nobody on it",
 }
+
+
+# Threads are per repository per day *per stream*. Work that has been sitting for weeks
+# and an issue that opened this morning are read at different speeds and deserve separate
+# threads: the fresh one is the one to open first, and it should not be buried under six
+# abandoned pull requests.
+WORK, FRESH = "work", "fresh"
+STREAM_FOR = {"fresh-and-free": FRESH}
 
 
 def _clip(text: str, limit: int) -> str:
@@ -70,10 +80,14 @@ class Item:
     url: str
     note: str
     idle_days: int = 0
+    stream: str = WORK
 
     @classmethod
     def from_opportunity(cls, o: Opportunity) -> Item:
-        return cls(o.key, o.kind, o.repo, o.number, o.title, o.url, o.note, o.idle_days)
+        return cls(
+            o.key, o.kind, o.repo, o.number, o.title, o.url, o.note, o.idle_days,
+            STREAM_FOR.get(o.kind, WORK),
+        )
 
     @classmethod
     def from_transition(cls, t: Transition, title: str = "", url: str = "") -> Item:
@@ -368,6 +382,27 @@ def buttons_for(item: Item) -> dict[str, Any]:
     }
 
 
+def control_row(repo: str) -> dict[str, Any]:
+    """The one button on a thread header: check this repository now.
+
+    Scheduled runs are late - measured at one to six hours on this repository, and GitHub
+    documents that schedules are delayed under load and may be dropped. That is fine for a
+    log and useless when you have twenty minutes free now, so the header carries a way to
+    ask immediately. It queues a workflow; nothing is written to GitHub by the tap.
+    """
+    return {
+        "type": ACTION_ROW,
+        "components": [
+            {
+                "type": BUTTON,
+                "style": PRIMARY,
+                "label": "Check now",
+                "custom_id": f"poll:{repo}",
+            }
+        ],
+    }
+
+
 def post(
     payload: dict[str, Any],
     webhook_url: str = "",
@@ -421,16 +456,22 @@ def item_message(item: Item) -> dict[str, Any]:
     }
 
 
-def by_repo(items: Iterable[Item]) -> dict[str, list[Item]]:
-    """Items grouped by repository, repositories in the order of their best item.
+def by_thread(items: Iterable[Item]) -> dict[tuple[str, str], list[Item]]:
+    """Items grouped by the thread they belong in: one per repository per stream.
 
-    The digest is already ranked, so the first repository here is the one holding the
-    single most actionable thing tonight, and each thread keeps its items in rank order.
+    The digest is already ranked, so the first group here is the one holding the single
+    most actionable thing tonight, and each thread keeps its items in rank order.
     """
-    groups: dict[str, list[Item]] = {}
+    groups: dict[tuple[str, str], list[Item]] = {}
     for item in items:
-        groups.setdefault(item.repo, []).append(item)
+        groups.setdefault((item.repo, item.stream), []).append(item)
     return groups
+
+
+def thread_label(repo: str, stream: str, day: str) -> str:
+    """What the channel line says. The stream is named only when it is not the usual one,
+    so an ordinary day still reads `17 Sep - owner/repo`."""
+    return f"{day} - {repo}" if stream == WORK else f"{day} - {repo} - {stream}"
 
 
 # A day, to match one thread per repository per day.
@@ -487,7 +528,7 @@ def send_threaded(
     state_file: Path,
     today: date,
 ) -> int:
-    """One thread per repository per day, one message per item inside it.
+    """One thread per repository per stream per day, one message per item inside it.
 
     The channel itself gets a single line per repository per day, so it reads as a
     list of days and projects rather than a wall of items. A second send on the same
@@ -505,24 +546,26 @@ def send_threaded(
     delivered: list[str] = []
 
     try:
-        for repo, items in by_repo(digest.items).items():
-            entry = todays.get(repo)
+        for (repo, stream), items in by_thread(digest.items).items():
+            name = thread_label(repo, stream, label)
+            key = f"{repo}:{stream}"
+            entry = todays.get(key)
             if entry is None:
                 header = request(
                     "POST",
                     f"/channels/{channel_id}/messages",
-                    {"content": f"{label} - {repo} ({len(items)})"},
+                    {"content": f"{name} ({len(items)})", "components": [control_row(repo)]},
                 )
                 thread = request(
                     "POST",
                     f"/channels/{channel_id}/messages/{header['id']}/threads",
                     {
-                        "name": _clip(f"{label} - {repo}", 100),
+                        "name": _clip(name, 100),
                         "auto_archive_duration": THREAD_ARCHIVE_MINUTES,
                     },
                 )
                 entry = {"thread": thread["id"], "header": header["id"], "count": 0}
-                todays[repo] = entry
+                todays[key] = entry
                 sent += 1
                 _save_threads(state_file, threads, today)
 
@@ -537,7 +580,7 @@ def send_threaded(
                 request(
                     "PATCH",
                     f"/channels/{channel_id}/messages/{entry['header']}",
-                    {"content": f"{label} - {repo} ({entry['count']})"},
+                    {"content": f"{name} ({entry['count']})"},
                 )
             _save_threads(state_file, threads, today)
     except (RuntimeError, httpx.HTTPError) as exc:

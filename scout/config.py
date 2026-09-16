@@ -87,6 +87,23 @@ class Settings(BaseSettings):
     digest_hour_local: int = 20
     digest_max_items: int = 8
 
+    # Fresh and free: an issue you could actually pick up tonight. Open, young, nobody
+    # assigned, no pull request linked to it, nobody claiming it in the comments, and a
+    # maintainer has said something - because an issue nobody has triaged might not be
+    # real work at all. Everything except the first two needs data the listing endpoint
+    # does not carry, which is what `scout enrich` fetches.
+    fresh_max_age_days: int = 7
+    # Labels that mean a maintainer wants this done. `bug` is absent on purpose: issue
+    # templates apply it automatically, so it describes the reporter, not a decision.
+    fresh_accepting_labels: str = (
+        "confirmed,accepting prs,accepting-prs,pr welcome,prs welcome,"
+        "pull requests welcome,triaged,ready,ready for work"
+    )
+    # Candidates enriched per run. One GraphQL request covers a batch of them, so this is
+    # a handful of requests a day, not a per-issue cost.
+    fresh_max_candidates: int = 40
+    fresh_batch_size: int = 10
+
     # Per request. Bounds one call, not the operation.
     timeout_seconds: float = 30.0
     # Whole-operation ceilings. A probe is up to nine requests and a poll one per repo,
@@ -116,6 +133,10 @@ class Settings(BaseSettings):
         if token.startswith(("ghp_", "gho_", "ghu_", "ghs_", "ghr_")):
             return "classic"
         return "unrecognised" if token else "missing"
+
+    @property
+    def accepting_label_list(self) -> list[str]:
+        return [x.strip().lower() for x in self.fresh_accepting_labels.split(",") if x.strip()]
 
     @property
     def language_list(self) -> list[str]:

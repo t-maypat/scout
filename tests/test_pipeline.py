@@ -539,7 +539,7 @@ class TestThreadPerRepoPerDay:
             notify.Digest(items=[self.item("a/x", 1)]), self.CH, self.FakeDiscord(),
             state, self.day(),
         )
-        thread = json.loads(state.read_text(encoding="utf-8"))["2026-09-14"]["a/x"]["thread"]
+        thread = json.loads(state.read_text(encoding="utf-8"))["2026-09-14"]["a/x:work"]["thread"]
 
         second = self.FakeDiscord()
         notify.send_threaded(
@@ -586,7 +586,8 @@ class TestThreadPerRepoPerDay:
         """A Discord that rate limits once `items` item messages have gone in."""
 
         def call(method, path, payload=None):
-            if len([c for c in fake.calls if "components" in (c[2] or {})]) == items:
+            # Item messages, not the thread header - that carries a button row of its own.
+            if len([c for c in fake.calls if "embeds" in (c[2] or {})]) == items:
                 raise RuntimeError("discord rate limited, retry after 0.3s")
             return fake(method, path, payload)
 
@@ -604,7 +605,7 @@ class TestThreadPerRepoPerDay:
                 digest, self.CH, self.limited_after(self.FakeDiscord(), 2), state, self.day()
             )
         assert failed.value.delivered == ["a/x#1:abandoned-pr", "a/x#2:abandoned-pr"]
-        entry = json.loads(state.read_text(encoding="utf-8"))["2026-09-14"]["a/x"]
+        entry = json.loads(state.read_text(encoding="utf-8"))["2026-09-14"]["a/x:work"]
         assert entry["thread"] and entry["count"] == 2
 
     def test_finishing_a_partial_send_reuses_its_thread_and_fixes_the_count(self, tmp_path):

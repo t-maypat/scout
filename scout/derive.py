@@ -8,15 +8,86 @@ Bump DERIVATION_VERSION when the meaning of any output changes, then replay and 
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from scout.events import ISSUE_OBSERVED, PR_OBSERVED, Event, parse_time
+from scout.events import ISSUE_ENRICHED, ISSUE_OBSERVED, PR_OBSERVED, Event, parse_time
 from scout.metrics import BEGINNER_LABELS, MAINTAINER
 
-DERIVATION_VERSION = 1
+DERIVATION_VERSION = 2
+
+# Somebody saying they are on it. Not a claim in any formal sense - GitHub has none
+# outside assignment - but on most projects this comment *is* the claim, and walking into
+# it is how a first contribution becomes a wasted evening. Matched loosely on purpose: a
+# false positive costs an issue that was probably contested anyway, a false negative costs
+# the whole point of the rule.
+CLAIM = re.compile(
+    r"\b("
+    r"i.?ll (take|work|do|try|submit|open|have a go)"
+    r"|i will (take|work|do|try|submit|open)"
+    r"|can i (take|work|pick|have|try|give)"
+    r"|could i (take|work|pick|try)"
+    r"|may i (take|work|pick)"
+    r"|assign (me|it to me|this to me)"
+    r"|i.?m (working|on it|taking|looking into)"
+    r"|i am (working|taking|looking into)"
+    r"|working on (this|it)"
+    r"|taking (this|it)"
+    r"|picking (this|it) up"
+    r"|i.?d like to (work|take|try|pick)"
+    r"|pr (incoming|coming|on the way)"
+    r"|raising a pr|opening a pr"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# A maintainer has said the work is real and wanted. Either signal counts; the
+# alternative is guessing from an untriaged title.
+#
+# `bug` is deliberately not here. On every large repository it is applied by the issue
+# template the moment somebody files, so it says what the reporter clicked, not what a
+# maintainer decided - the same mistake as trusting `authorAssociation`. Put it back
+# through SCOUT_FRESH_ACCEPTING_LABELS for a project you know triages by hand.
+# `help wanted` is also absent, for a different reason: it is in BEGINNER_LABELS, which
+# this rule excludes. Maintainers use it to invite outside help, and bots race it for
+# exactly that reason - so counting it here and excluding it there would contradict.
+ACCEPTING_LABELS = frozenset(
+    {
+        "confirmed",
+        "accepting prs",
+        "accepting-prs",
+        "pr welcome",
+        "prs welcome",
+        "pull requests welcome",
+        "triaged",
+        "ready",
+        "ready for work",
+    }
+)
+
+# Not work, or not yet work. A question is a conversation, a duplicate is closed by
+# somebody else's fix, and needs-info is not actionable by anyone yet.
+BLOCKING_LABELS = frozenset(
+    {
+        "question",
+        "support",
+        "duplicate",
+        "invalid",
+        "wontfix",
+        "needs info",
+        "needs-info",
+        "needs more info",
+        "needs reproduction",
+        "stale",
+        "discussion",
+        "rfc",
+        "blocked",
+        "on hold",
+    }
+)
 
 ISSUE, PULL = "issue", "pr"
 
@@ -41,6 +112,13 @@ class Subject:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     observations: int = 0
+    # From enrichment, which asks about candidates only. `enriched_at` is the version of
+    # the issue the answer describes: when it does not match `updated_at` the answer is
+    # stale, and when it is None nobody asked. Both mean "unknown", never "nothing there"
+    # - a rule that needs this data refuses rather than assumes.
+    linked_prs: tuple[dict[str, Any], ...] = ()
+    seen_comments: tuple[dict[str, Any], ...] = ()
+    enriched_at: datetime | None = None
 
     @property
     def key(self) -> str:
@@ -61,6 +139,50 @@ class Subject:
     @property
     def beginner_labelled(self) -> bool:
         return bool({label.lower() for label in self.labels} & BEGINNER_LABELS)
+
+    @property
+    def enriched(self) -> bool:
+        """Is what we know about links and comments current for this version?"""
+        return self.enriched_at is not None and self.enriched_at == self.updated_at
+
+    @property
+    def open_linked_prs(self) -> tuple[int, ...]:
+        """Pull requests still open that name this issue. One is enough to walk away."""
+        return tuple(
+            int(pr["number"])
+            for pr in self.linked_prs
+            if str(pr.get("state", "")).upper() == "OPEN"
+        )
+
+    def claimants(self, maintainers: frozenset[str] = frozenset()) -> tuple[str, ...]:
+        """Who has said they are on it, maintainers excluded - a maintainer writing "I
+        will fix this" is them taking it, which the assignee check already covers, and
+        "PRs welcome" from that same person is the opposite of a claim."""
+        found = []
+        for comment in self.seen_comments:
+            author = comment.get("author") or ""
+            association = comment.get("association") or "NONE"
+            if association in MAINTAINER or author in maintainers:
+                continue
+            if CLAIM.search(comment.get("body") or ""):
+                found.append(author)
+        return tuple(dict.fromkeys(found))
+
+    def maintainer_replied(self, maintainers: frozenset[str] = frozenset()) -> bool:
+        return any(
+            (c.get("association") or "NONE") in MAINTAINER
+            or (c.get("author") or "") in maintainers
+            for c in self.seen_comments
+        )
+
+    def accepting(self, accepted: frozenset[str] = ACCEPTING_LABELS) -> tuple[str, ...]:
+        """Labels on this issue that mean a maintainer wants the work done."""
+        lowered = {label.lower() for label in self.labels}
+        return tuple(sorted(lowered & accepted))
+
+    @property
+    def blocked_by_label(self) -> bool:
+        return bool({label.lower() for label in self.labels} & BLOCKING_LABELS)
 
     def idle_days(self, now: datetime) -> int:
         if not self.updated_at:
@@ -176,10 +298,23 @@ def _diff(before: Subject, after: Subject) -> list[Transition]:
 
 def derive(events: Iterable[Event]) -> State:
     """Fold the log into current state. Pure, and safe to run on any prefix of the log."""
+    events = list(events)
     ordered = sorted(
         (e for e in events if e.kind in (ISSUE_OBSERVED, PR_OBSERVED)),
         key=lambda e: (e.occurred_at or e.observed_at, e.id),
     )
+    # Enrichment describes one version of one issue, so the newest answer wins and is
+    # attached after the fold: it is an answer *about* an observation, not one itself.
+    enrichments: dict[str, Event] = {}
+    for event in events:
+        if event.kind != ISSUE_ENRICHED:
+            continue
+        key = f"{event.repo}#{event.subject}"
+        best = enrichments.get(key)
+        if best is None or (event.occurred_at or event.observed_at) >= (
+            best.occurred_at or best.observed_at
+        ):
+            enrichments[key] = event
 
     state = State()
     for event in ordered:
@@ -207,6 +342,14 @@ def derive(events: Iterable[Event]) -> State:
             observed.observations = 1
         state.subjects[observed.key] = observed
 
+    for key, event in enrichments.items():
+        subject = state.subjects.get(key)
+        if subject is None:
+            continue
+        subject.linked_prs = tuple(event.payload.get("linked_prs") or ())
+        subject.seen_comments = tuple(event.payload.get("comments") or ())
+        subject.enriched_at = event.occurred_at
+
     state.transitions.sort(key=lambda t: t.at)
     return state
 
@@ -219,6 +362,8 @@ def opportunities(
     abandoned_pr_days: int = 30,
     unanswered_min_hours: float = 24,
     unanswered_max_days: int = 14,
+    fresh_max_age_days: int = 7,
+    accepting_labels: Iterable[str] | None = None,
     repos: Iterable[str] | None = None,
     maintainers: dict[str, Iterable[str]] | None = None,
 ) -> list[Opportunity]:
@@ -230,6 +375,11 @@ def opportunities(
     now = now or datetime.now(UTC)
     allowed = set(repos) if repos is not None else None
     known = {repo: frozenset(logins) for repo, logins in (maintainers or {}).items()}
+    accepted = (
+        ACCEPTING_LABELS
+        if accepting_labels is None
+        else frozenset(label.lower() for label in accepting_labels)
+    )
     found: list[Opportunity] = []
 
     for subject in state.subjects.values():
@@ -296,7 +446,44 @@ def opportunities(
                 )
             )
 
-    found.sort(key=lambda o: o.idle_days, reverse=True)
+        # Fresh and free: young, unassigned, no pull request open against it, nobody in
+        # the comments saying they are on it, and a maintainer has shown it is real work.
+        # The only rule that needs enrichment - without it the answer is unknown rather
+        # than yes, so an unenriched issue is never offered.
+        if (
+            subject.kind == ISSUE
+            and subject.enriched
+            and not subject.assignees
+            and not subject.beginner_labelled
+            and not subject.blocked_by_label
+            and not subject.open_linked_prs
+            and not subject.claimants(team)
+            and age <= fresh_max_age_days * 24
+            and (subject.maintainer_replied(team) or subject.accepting(accepted))
+        ):
+            why = (
+                f"labelled {', '.join(subject.accepting(accepted))}"
+                if subject.accepting(accepted)
+                else "a maintainer replied"
+            )
+            found.append(
+                Opportunity(
+                    repo=subject.repo,
+                    number=subject.number,
+                    kind="fresh-and-free",
+                    title=subject.title,
+                    url=subject.url,
+                    idle_days=int(age / 24),
+                    note=f"{why}, no PR, nobody claiming it",
+                    subject_kind=ISSUE,
+                )
+            )
+
+    # Fresh first and youngest first, because those are the ones that stop being free.
+    # Everything else is ranked by how long it has sat, which only grows.
+    found.sort(
+        key=lambda o: (0, o.idle_days) if o.kind == "fresh-and-free" else (1, -o.idle_days)
+    )
     return found
 
 

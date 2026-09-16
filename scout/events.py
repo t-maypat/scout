@@ -30,8 +30,15 @@ PR_OBSERVED = "pr_observed"
 # Our own actions, logged so they can be replayed and so a digest never repeats itself.
 PROBE_COMPLETED = "probe_completed"
 NOTIFICATION_SENT = "notification_sent"
+# What the listing endpoint cannot say: whether a pull request is already linked to an
+# issue, and who has spoken up in its comments. Recorded as raw as is practical - the
+# rules that read "claimed" or "validated" out of it belong in derivation, so they can be
+# fixed and replayed.
+ISSUE_ENRICHED = "issue_enriched"
 
-KINDS = frozenset({ISSUE_OBSERVED, PR_OBSERVED, PROBE_COMPLETED, NOTIFICATION_SENT})
+KINDS = frozenset(
+    {ISSUE_OBSERVED, PR_OBSERVED, PROBE_COMPLETED, NOTIFICATION_SENT, ISSUE_ENRICHED}
+)
 
 
 def _now() -> datetime:

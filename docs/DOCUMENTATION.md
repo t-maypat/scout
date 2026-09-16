@@ -90,6 +90,7 @@ uv run scout serve     # or browse it
 | `mark <repo> <status>` | `--setup` `--test` `--minutes` `--notes` | Record what building it took |
 | `rm <repo>` | | Drop it from the watchlist |
 | `poll` | `--dry-run` `--all` | Fetch changes, append observations |
+| `enrich` | | Ask about this week unassigned issues: linked PRs, who is claiming them |
 | `digest` | `--send` | Build the digest; `--send` posts it to Discord |
 | `events` | | Event counts by kind, log size |
 | `replay` | `--check` | Rebuild derived state; `--check` proves it is deterministic |
@@ -317,7 +318,13 @@ GitHub is a link button and needs nothing at all.
 | Scheduled runs | GitHub Actions | Free on a public repo |
 | Public HTTPS receiver | Cloudflare Worker | Discord needs an answer in three seconds |
 
-`.github/workflows/poll.yml` runs every 15 minutes; `digest.yml` at 14:30 UTC.
+`.github/workflows/poll.yml` runs every 15 minutes; `digest.yml` at 14:30 UTC;
+`now.yml` runs on demand, which is what the **Check now** button in Discord queues.
+
+Measured on this repository over four days: poll runs land **1 to 6 hours apart**,
+median about 4, and the digest committed at 18:21 and 18:25 UTC against a 14:30
+schedule. GitHub documents this - scheduled runs are delayed under load and queued
+jobs may be dropped. Treat the schedule as a floor, and use the button when it matters.
 
 Repository secrets: `SCOUT_GITHUB_TOKEN`, plus either `SCOUT_DISCORD_WEBHOOK_URL` for plain
 notifications or `SCOUT_DISCORD_BOT_TOKEN` and `SCOUT_DISCORD_CHANNEL_ID` for threads and
@@ -361,6 +368,11 @@ All environment variables, prefixed `SCOUT_`. Set them in `.env`.
 | **Poll** | | |
 | `POLL_ONLY_ACTIONABLE` | `true` | Restrict to `green`/`active` |
 | `POLL_PER_PAGE` | `100` | |
+| **Fresh and free** | | |
+| `FRESH_MAX_AGE_DAYS` | `7` | How young an issue must be to count as fresh |
+| `FRESH_MAX_CANDIDATES` | `40` | Issues enriched per run |
+| `FRESH_BATCH_SIZE` | `10` | Issues per GraphQL request |
+| `FRESH_ACCEPTING_LABELS` | see below | Labels that mean a maintainer wants the work |
 | **Digest** | | |
 | `DIGEST_MAX_ITEMS` | `8` | |
 | `TRANSITION_HOURS` | `36` | How far back "just came free" looks |

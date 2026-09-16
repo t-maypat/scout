@@ -23,16 +23,17 @@ flowchart LR
             st[("state/")]
         end
         subgraph actions["GitHub Actions"]
-            pollwf["poll.yml<br/>every 15 minutes"]
-            digestwf["digest.yml<br/>daily, 20.00 IST"]
+            pollwf["poll.yml<br/>every 15 minutes, in practice hourly at best"]
+            digestwf["digest.yml<br/>daily, enrich then send"]
+            nowwf["now.yml<br/>on demand, from the button"]
         end
     end
 
     subgraph dc["Discord"]
-        chan["scout channel<br/>a thread per repo per day"]
+        chan["scout channel<br/>two threads per repo per day:<br/>fresh, and everything else"]
     end
 
-    worker["Cloudflare Worker<br/>not wired up yet"]
+    worker["Cloudflare Worker<br/>verifies the tap, queues a workflow"]
 
     cli -- "probe, GraphQL" --> api
     cli -- "verdicts, maintainers" --> wl
@@ -46,6 +47,9 @@ flowchart LR
     dash -- "reads" --> log
     dash -- "reads" --> wl
     chan -. "button tap" .-> worker
+    worker -- "Check now, workflow_dispatch" --> nowwf
+    nowwf -- "poll, enrich, send" --> chan
+    digestwf -- "enrich, GraphQL" --> api
 ```
 
 Three things move, and each has one job:
@@ -54,6 +58,7 @@ Three things move, and each has one job:
 |---|---|---|
 | **Probe** | Decide whether a repository is worth your time | You, on demand |
 | **Poll** | Record what changed on the repositories you watch | A cron, every 15 minutes |
+| **Enrich** | Ask what the listing cannot say about fresh issues | Before each digest |
 | **Digest** | Tell you about it once, when you can act | A cron, once a day |
 
 Everything else reads what those three wrote. The dashboard, `scout list`, `scout events`
@@ -75,6 +80,10 @@ receive webhooks from them and has to go and look instead. That is the poll.
 **A cron is what makes the looking happen.** GitHub Actions has a `schedule:` trigger that
 runs a workflow on a cron expression. `poll.yml` runs `*/15 * * * *`; `digest.yml` runs
 `30 14 * * *`, which is 20:00 IST. Both can also be started by hand from the Actions tab.
+
+**A cron is a floor, not a promise.** Measured here: polls 1 to 6 hours apart, and a 14:30
+digest committing at 18:2x, which lands the evening digest near midnight IST. `now.yml`
+exists for that reason and is what the Check now button dispatches.
 
 **Webhooks only appear at the Discord end**, and there are two kinds:
 
@@ -185,6 +194,7 @@ reopened, left draft), and the uncontested work:
 | `stale-assignment` | Open, assigned, untouched for 21 days |
 | `abandoned-pr` | Open, not a draft, untouched for 30 days, not by a maintainer |
 | `unanswered-report` | Opened by an outsider, no comments, between 24 hours and 14 days old |
+| `fresh-and-free` | Open, under 7 days old, unassigned, no open linked PR, nobody claiming it in the comments, and a maintainer replied or an accepting label. Needs enrichment; without it the issue is never offered |
 
 "Maintainer" comes from the set the last probe stored on the watchlist entry, so a
 maintainer's own stale pull request is never offered to you. Beginner-labelled issues are
@@ -221,6 +231,20 @@ sequenceDiagram
     Cron->>Repo: commit and push events and state
 ```
 
+**Fresh and free.** The rule that answers "is there something I could pick up tonight":
+an open issue, under `FRESH_MAX_AGE_DAYS` old, nobody assigned, **no open pull request
+linked to it**, nobody in the comments saying they are on it, and a maintainer has shown
+it is real work - either by replying or by an accepting label. The last three need data
+`/issues` does not carry, which is what `scout enrich` fetches: one GraphQL request per
+ten candidates, a handful a day.
+
+Two labels are deliberately excluded. `bug` is applied by the issue template on filing,
+so it describes the reporter rather than a decision. `help wanted` is in
+`BEGINNER_LABELS`, which this rule excludes, because bots race those.
+
+**An issue with no enrichment is never offered.** Without it, "free" is unknown rather
+than true, and the whole point of the rule is not walking into a race you cannot see.
+
 **Choosing what to send:** transitions from the last 36 hours come first, then the
 longest-idle work, then anything already sent or hidden is removed and the top 8 are kept.
 "Already sent" is a `notification_sent` event in the log, and hiding an item in the
@@ -235,6 +259,11 @@ dashboard writes the same kind of event, so the two never disagree.
   `SCOUT_DISPLAY_TZ`, and thread ids are kept in `state/discord_threads.json` for a week.
 - **By webhook** (no bot configured): a single message with every item as an embed and no
   buttons.
+- **Two threads per repository per day**, one per stream: fresh work in
+  `17 Sep - owner/repo - fresh`, everything else in `17 Sep - owner/repo`. An issue that
+  opened this morning and a pull request abandoned in July are read at different speeds.
+- **Each thread header carries a Check now button**, which queues `now.yml` through the
+  Worker: poll, enrich, send what is new. Nothing is written to GitHub by the tap.
 - **Paced either way.** Discord limits bursts per channel and publishes no numbers for it,
   so requests go a second apart, a bucket Discord reports empty is waited out, and a 429 is
   retried after the wait it names. Every wait is capped at 5 seconds and the whole send at
@@ -324,6 +353,8 @@ running either locally.
 | Rate-limit floor | stop with 500 requests left | `SCOUT_RATE_LIMIT_FLOOR` |
 | Watched repositories | at most 25 | `SCOUT_MAX_POLL_REPOS` |
 | Items per digest | 8 | `SCOUT_DIGEST_MAX_ITEMS` |
+| Fresh window | 7 days | `SCOUT_FRESH_MAX_AGE_DAYS` |
+| Issues enriched per run | 40, in batches of 10 | `SCOUT_FRESH_MAX_CANDIDATES` |
 | Discord pacing | 1 second between requests | `SEND_INTERVAL` in `notify.py` |
 | Discord waits | at most 5 seconds each, 3 retries on a 429 | `MAX_RATE_LIMIT_WAIT`, `RATE_LIMIT_RETRIES` |
 | Digest send deadline | 120 seconds | `SEND_DEADLINE` |
@@ -336,8 +367,10 @@ running either locally.
 ## Known gaps
 
 - **Later and Not for me record nothing yet**, as described under Buttons.
-- **Scheduled runs are late.** GitHub gives low priority to schedules; on this repository
-  runs set for every 15 minutes have started between 2 and 6 hours apart. The digest only
+- **Scheduled runs are late.** Measured over four days: poll commits land 1 to 6 hours
+  apart, median about 4, and the digest committed at 18:21 and 18:25 UTC against its
+  14:30 schedule - so the evening digest arrives nearer midnight IST than 20:00. The
+  Check now button exists because of this. The digest only
   needs the log to be reasonably current by the evening, so this costs little, but do not
   expect 15-minute freshness.
 - **Fine-grained tokens expire.** When `SCOUT_GITHUB_TOKEN` does, every scheduled poll

@@ -30,6 +30,11 @@ const EPHEMERAL = 1 << 6;
 
 // custom_id format: "<action>:<owner>/<repo>:<number>", e.g. "claim:pola-rs/polars:8821"
 const CUSTOM_ID = /^(claim|dispatch|snooze|dismiss):([\w.-]+\/[\w.-]+):(\d+)$/;
+// A control button belongs to a repository rather than one item: "poll:owner/repo".
+const CONTROL_ID = /^(poll):([\w.-]+\/[\w.-]+)$/;
+// Scheduled runs are late by hours; this is the way to ask for a check right now. It
+// polls, enriches and sends whatever is new, all of it the same read-only code path.
+const CHECK_NOW_WORKFLOW = "now.yml";
 
 const hexToBytes = (hex) =>
   Uint8Array.from(hex.match(/.{1,2}/g) ?? [], (byte) => parseInt(byte, 16));
@@ -68,14 +73,10 @@ const reply = (content) =>
     data: { content, flags: EPHEMERAL },
   });
 
-/** Queue the work in GitHub Actions. Returns a human-readable outcome, never throws. */
-async function dispatch(env, action, repo, number, actor) {
-  if (!env.GITHUB_TOKEN || !env.GITHUB_REPO) {
-    return "Not wired up yet — the worker has no GitHub token.";
-  }
-
+/** Queue a workflow in GitHub Actions. Returns the HTTP status, never throws. */
+async function runWorkflow(env, workflow, inputs) {
   const response = await fetch(
-    `https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/dispatch.yml/dispatches`,
+    `https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/${workflow}/dispatches`,
     {
       method: "POST",
       headers: {
@@ -84,17 +85,42 @@ async function dispatch(env, action, repo, number, actor) {
         "Content-Type": "application/json",
         "User-Agent": "scout-worker",
       },
-      body: JSON.stringify({
-        ref: env.GITHUB_REF || "main",
-        inputs: { action, repo, number: String(number), actor },
-      }),
+      body: JSON.stringify({ ref: env.GITHUB_REF || "main", inputs }),
     },
   );
+  return response.status;
+}
 
-  if (response.status === 204) {
+/** Queue the work for one item. Returns a human-readable outcome, never throws. */
+async function dispatch(env, action, repo, number, actor) {
+  if (!env.GITHUB_TOKEN || !env.GITHUB_REPO) {
+    return "Not wired up yet — the worker has no GitHub token.";
+  }
+  const status = await runWorkflow(env, "dispatch.yml", {
+    action,
+    repo,
+    number: String(number),
+    actor,
+  });
+  if (status === 204) {
     return `Queued **${action}** on \`${repo}#${number}\`. Nothing has been posted to GitHub — the job will report back here.`;
   }
-  return `GitHub refused the dispatch (${response.status}). Check the worker's token scopes.`;
+  return `GitHub refused the dispatch (${status}). Check the worker's token scopes.`;
+}
+
+/** Poll, enrich and send whatever is new, now rather than whenever the cron lands. */
+async function checkNow(env, repo, actor) {
+  if (!env.GITHUB_TOKEN || !env.GITHUB_REPO) {
+    return "Not wired up yet — the worker has no GitHub token.";
+  }
+  const status = await runWorkflow(env, CHECK_NOW_WORKFLOW, { repo, actor });
+  if (status === 204) {
+    return `Checking \`${repo}\` now. Anything new lands in today's threads in a minute or two; nothing is written to GitHub.`;
+  }
+  if (status === 404) {
+    return `GitHub has no \`${CHECK_NOW_WORKFLOW}\` on the default branch yet (404).`;
+  }
+  return `GitHub refused the dispatch (${status}). Check the worker's token scopes.`;
 }
 
 export default {
@@ -125,14 +151,20 @@ export default {
     }
 
     const customId = interaction.data?.custom_id ?? "";
+    const actor =
+      interaction.member?.user?.username ?? interaction.user?.username ?? "unknown";
+
+    const control = CONTROL_ID.exec(customId);
+    if (control) {
+      return reply(await checkNow(env, control[2], actor));
+    }
+
     const match = CUSTOM_ID.exec(customId);
     if (!match) {
       return reply("I do not recognise that button.");
     }
 
     const [, action, repo, number] = match;
-    const actor =
-      interaction.member?.user?.username ?? interaction.user?.username ?? "unknown";
 
     if (action === "snooze" || action === "dismiss") {
       // Recorded by the next poll rather than acted on here, so the receiver stays

@@ -1,0 +1,76 @@
+name: now
+
+# Check on demand. The schedule is late by hours - GitHub documents that scheduled runs
+# are delayed under load and may be dropped, and on this repository polls land one to six
+# hours apart - which is fine for a log and useless when there is twenty minutes free now.
+# Tapping "Check now" in Discord queues this through the Cloudflare Worker.
+#
+# It is the same read-only path as the scheduled jobs: poll, enrich, send what is new.
+# The digest never repeats an item it has already sent, so running this often is safe.
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Repository the button belonged to (recorded, not a filter)"
+        required: false
+        type: string
+      actor:
+        description: "Who tapped it"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+# Never two of these at once, and never one racing the scheduled poll.
+concurrency:
+  group: scout-poll
+  cancel-in-progress: false
+
+jobs:
+  now:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen
+
+      - name: Who asked
+        run: echo "requested by ${{ inputs.actor || 'workflow_dispatch' }} for ${{ inputs.repo || 'the whole watchlist' }}"
+
+      - name: Poll the watchlist
+        env:
+          SCOUT_GITHUB_TOKEN: ${{ secrets.SCOUT_GITHUB_TOKEN }}
+        run: uv run scout poll
+
+      - name: Enrich this week's unassigned issues
+        continue-on-error: true
+        env:
+          SCOUT_GITHUB_TOKEN: ${{ secrets.SCOUT_GITHUB_TOKEN }}
+        run: uv run scout enrich
+
+      - name: Send whatever is new
+        env:
+          SCOUT_GITHUB_TOKEN: ${{ secrets.SCOUT_GITHUB_TOKEN }}
+          SCOUT_DISCORD_WEBHOOK_URL: ${{ secrets.SCOUT_DISCORD_WEBHOOK_URL }}
+          SCOUT_DISCORD_BOT_TOKEN: ${{ secrets.SCOUT_DISCORD_BOT_TOKEN }}
+          SCOUT_DISCORD_CHANNEL_ID: ${{ secrets.SCOUT_DISCORD_CHANNEL_ID }}
+        run: uv run scout digest --send
+
+      - name: Record what happened
+        # always(): the send may have posted some items before failing, and those are
+        # recorded. Skipping this on failure would throw that away with the runner.
+        if: ${{ always() }}
+        run: |
+          if [ -z "$(git status --porcelain events state)" ]; then exit 0; fi
+          git config user.name "scout"
+          git config user.email "scout@users.noreply.github.com"
+          git add events state
+          git commit -m "check now: $(date -u +%Y-%m-%dT%H:%MZ)"
+          git pull --rebase --autostash
+          git push

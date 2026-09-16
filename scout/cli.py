@@ -16,6 +16,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from scout import cursors, derive, metrics, notify, watchlist
+from scout import enrich as enrichment
 from scout.config import get_settings
 from scout.events import EventLog
 from scout.github import GitHubClient, GitHubError, NotFound
@@ -428,6 +429,48 @@ def poll(
 
 
 @app.command()
+def enrich():
+    """Ask GitHub what the listing cannot say about this week's unassigned issues.
+
+    Linked pull requests and comment authors, for candidates only - a handful of requests.
+    Writes observations to the log; decides nothing. Run it before the digest.
+    """
+    settings = get_settings()
+    try:
+        assert_enabled(settings.enabled)
+    except SafetyError as exc:
+        console.print(f"[yellow]{exc}[/]")
+        raise typer.Exit(0) from exc
+
+    log = _log()
+    state = derive.derive(log.read())
+    book = watchlist.load()
+    repos = [entry.full_name for entry in _poll_targets(book)] or None
+
+    with _client() as client:
+        events, problems = enrichment.enrich(
+            client,
+            state,
+            max_age_days=settings.fresh_max_age_days,
+            limit=settings.fresh_max_candidates,
+            batch_size=settings.fresh_batch_size,
+            repos=repos,
+        )
+
+    written = log.append(events)
+    console.print(
+        f"[green]{len(written)} new[/] of {len(events)} enriched, "
+        f"{client.points_spent} rate-limit points spent"
+    )
+    for problem in problems:
+        console.print(f"[yellow]{problem}[/]")
+    # Partial failure is still progress: what came back is in the log. Exit non-zero only
+    # when nothing did, so a scheduled run says so without losing the good batches.
+    if problems and not written:
+        raise typer.Exit(1)
+
+
+@app.command()
 def digest(send: bool = typer.Option(False, "--send", help="POST it to Discord")):
     """Build the evening digest from derived state. Prints it unless --send is given."""
     settings = get_settings()
@@ -445,6 +488,8 @@ def digest(send: bool = typer.Option(False, "--send", help="POST it to Discord")
         state,
         stale_assignment_days=settings.stale_assignment_days,
         abandoned_pr_days=settings.abandoned_pr_days,
+        fresh_max_age_days=settings.fresh_max_age_days,
+        accepting_labels=settings.accepting_label_list,
         repos=repos,
         maintainers={e.full_name: e.maintainers for e in book.repo if e.maintainers},
     )

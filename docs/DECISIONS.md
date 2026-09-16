@@ -357,6 +357,46 @@ Two rules the interface keeps:
 
 ---
 
+## Fresh and free, and why it needs its own fetch
+
+The first three opportunity rules all answer the same question - has this been
+abandoned - and the listing endpoint answers it alone. None of them answers the
+question that actually gets asked on a free evening: is there something here nobody
+has started yet.
+
+That needs two facts `/issues` does not carry:
+
+- **Is a pull request already open against it.** The listing has no link between an
+  issue and a PR at all.
+- **Has somebody said they are on it.** The listing gives a comment count, not authors,
+  and on most projects a comment *is* the claim - GitHub has no claim outside assignment.
+
+So enrichment is a separate command over candidates only, and what it writes stays close
+to raw: linked pull requests, and each comment author, association and opening words.
+Reading "claimed" or "validated" out of that is derivation, so a wrong rule can be
+fixed and replayed rather than having been baked into the log.
+
+**The digest still makes no network call.** Enrichment writes observations; the digest
+reads them. That boundary is what keeps a digest reproducible from the log alone.
+
+**An unenriched issue is never offered.** Unknown is not the same as free, and this rule
+exists precisely to avoid a race that cannot be seen from the listing.
+
+---
+
+## The schedule is a floor, so there is a button
+
+Scheduled workflows are delayed under load and may be dropped, which GitHub documents
+and this repository measures: polls 1 to 6 hours apart, and a 14:30 digest committing
+at 18:2x. For a log that costs nothing. For "I have twenty minutes free now" it is
+useless.
+
+So each thread header carries **Check now**, which the Worker turns into a
+`workflow_dispatch` of `now.yml`: poll, enrich, send what is new. The Worker still
+cannot write to GitHub - it queues a job, and the job is the same read-only path.
+
+---
+
 ## Things that were wrong
 
 Kept deliberately, because the reasoning is more useful than a clean history.
@@ -371,4 +411,5 @@ Kept deliberately, because the reasoning is more useful than a clean history.
 | Probing on every detail-view open | Spent rate limit on a click, silently | Reads the cached probe; re-probing is a button |
 | Request models inside `create_app()` | `from __future__ import annotations` made their hints unresolvable; every POST answered `422` | Hoisted to module scope |
 | Per-request timeouts only | Bounded one request, not an operation that makes nine | A deadline over the whole operation |
+| `bug` as evidence of triage | Issue templates apply it on filing, so it reports what the reporter clicked. Eight litellm issues qualified on it alone | Accepting labels are triage decisions (`confirmed`, `accepting prs`); a maintainer reply is the other route |
 | Digest requests sent back to back, failing on the first 429 | Tripped Discord's per-channel bucket on the seventh item with 0.3s to wait. The record step then skipped on failure, so six delivered items went unrecorded and their thread id was lost | One second between requests, capped retries, a send deadline, partial sends recorded, and a record step that always runs |
