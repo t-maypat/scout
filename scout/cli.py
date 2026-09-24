@@ -454,6 +454,7 @@ def enrich():
             max_age_days=settings.fresh_max_age_days,
             limit=settings.fresh_max_candidates,
             batch_size=settings.fresh_batch_size,
+            recheck_after_hours=settings.fresh_recheck_after_hours,
             repos=repos,
         )
 
@@ -779,6 +780,17 @@ def doctor(repo: str = typer.Option("", "--repo", help="Also try probing this on
         f"read-only, cap {settings.max_poll_repos} repos, "
         f"rate floor {settings.rate_limit_floor}"
     )
+    log_dir = Path(settings.events_dir)
+    if log_dir.is_dir():
+        console.print(f"log: [green]{log_dir}[/] holds {_log().count():,} events")
+    else:
+        # The log is on the `data` branch, so a fresh clone has the code and none of the
+        # history. Without this the first command just reports an empty log.
+        console.print(
+            f"log: [yellow]{log_dir} is missing[/] - the log lives on the `data` branch, "
+            "add it with [bold]git worktree add data data[/]"
+        )
+        failures += 1
     hook = settings.discord_webhook_url
     if settings.posts_as_bot:
         failures += _check_discord_bot(settings)

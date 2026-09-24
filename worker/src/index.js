@@ -32,9 +32,10 @@ const EPHEMERAL = 1 << 6;
 const CUSTOM_ID = /^(claim|dispatch|snooze|dismiss):([\w.-]+\/[\w.-]+):(\d+)$/;
 // A control button belongs to a repository rather than one item: "poll:owner/repo".
 const CONTROL_ID = /^(poll):([\w.-]+\/[\w.-]+)$/;
-// Scheduled runs are late by hours; this is the way to ask for a check right now. It
-// polls, enriches and sends whatever is new, all of it the same read-only code path.
-const CHECK_NOW_WORKFLOW = "now.yml";
+// The digest workflow does the whole chain - poll, enrich, send - so dispatching it is
+// how you ask for an answer now. A dispatch is created by this API call rather than by
+// GitHub scheduler, which is why it runs when a cron might not.
+const CHECK_NOW_WORKFLOW = "digest.yml";
 
 const hexToBytes = (hex) =>
   Uint8Array.from(hex.match(/.{1,2}/g) ?? [], (byte) => parseInt(byte, 16));
@@ -115,7 +116,7 @@ async function checkNow(env, repo, actor) {
   }
   const status = await runWorkflow(env, CHECK_NOW_WORKFLOW, { repo, actor });
   if (status === 204) {
-    return `Checking \`${repo}\` now. Anything new lands in today's threads in a minute or two; nothing is written to GitHub.`;
+    return `Checking now. Anything new since the last digest lands in today's threads in a minute or two; already-sent items are not repeated, and nothing is written to GitHub.`;
   }
   if (status === 404) {
     return `GitHub has no \`${CHECK_NOW_WORKFLOW}\` on the default branch yet (404).`;

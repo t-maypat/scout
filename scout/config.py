@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     # a handful of requests a day, not a per-issue cost.
     fresh_max_candidates: int = 40
     fresh_batch_size: int = 10
+    # Re-ask about a candidate once its answer is this old, even if the issue has not
+    # moved. A commit pushed to a fork does not touch the issue, so version equality
+    # alone would treat a stale answer as current forever.
+    fresh_recheck_after_hours: float = 12
 
     # Per request. Bounds one call, not the operation.
     timeout_seconds: float = 30.0
@@ -112,8 +116,11 @@ class Settings(BaseSettings):
     probe_deadline_seconds: float = 90.0
     poll_deadline_seconds: float = 180.0
     watchlist_path: str = "./watchlist.toml"
-    state_dir: str = "./state"
-    events_dir: str = "./events"
+    # The log lives on the `data` branch, checked out here as a worktree locally and as
+    # a second checkout in Actions. Keeping it off main is what stopped 69 of 108
+    # commits from being noise; see docs/DECISIONS.md.
+    state_dir: str = "./data/state"
+    events_dir: str = "./data/events"
     log_level: str = "info"
 
     @property

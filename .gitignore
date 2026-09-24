@@ -11,3 +11,6 @@ worker/.wrangler/
 
 # Private working notes: what was believed, what was true, what it cost.
 LEARNINGS.md
+
+# The event log, checked out from the `data` branch as a worktree.
+/data/

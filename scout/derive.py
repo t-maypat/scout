@@ -117,8 +117,13 @@ class Subject:
     # stale, and when it is None nobody asked. Both mean "unknown", never "nothing there"
     # - a rule that needs this data refuses rather than assumes.
     linked_prs: tuple[dict[str, Any], ...] = ()
+    commit_refs: tuple[dict[str, Any], ...] = ()
     seen_comments: tuple[dict[str, Any], ...] = ()
     enriched_at: datetime | None = None
+    # When the answer was fetched, as opposed to which version it describes. A commit
+    # pushed to a fork does not touch the issue, so a matching version is not proof the
+    # answer is current - `scout enrich` re-asks once this passes its TTL.
+    enriched_observed_at: datetime | None = None
 
     @property
     def key(self) -> str:
@@ -144,6 +149,26 @@ class Subject:
     def enriched(self) -> bool:
         """Is what we know about links and comments current for this version?"""
         return self.enriched_at is not None and self.enriched_at == self.updated_at
+
+    @property
+    def fork_commits(self) -> tuple[str, ...]:
+        """Repositories other than this one holding a commit that names this issue.
+
+        A commit in somebody else's fork is the earliest honest sign that an outsider has
+        started - earlier than a pull request, which is the point. A commit in the
+        upstream repository is usually a maintainer working or referring to it in passing,
+        so it does not count as taken.
+        """
+        mine = self.repo.lower()
+        return tuple(
+            sorted(
+                {
+                    str(ref.get("repo"))
+                    for ref in self.commit_refs
+                    if ref.get("repo") and str(ref["repo"]).lower() != mine
+                }
+            )
+        )
 
     @property
     def open_linked_prs(self) -> tuple[int, ...]:
@@ -347,8 +372,10 @@ def derive(events: Iterable[Event]) -> State:
         if subject is None:
             continue
         subject.linked_prs = tuple(event.payload.get("linked_prs") or ())
+        subject.commit_refs = tuple(event.payload.get("commit_refs") or ())
         subject.seen_comments = tuple(event.payload.get("comments") or ())
         subject.enriched_at = event.occurred_at
+        subject.enriched_observed_at = event.observed_at
 
     state.transitions.sort(key=lambda t: t.at)
     return state
@@ -457,6 +484,7 @@ def opportunities(
             and not subject.beginner_labelled
             and not subject.blocked_by_label
             and not subject.open_linked_prs
+            and not subject.fork_commits
             and not subject.claimants(team)
             and age <= fresh_max_age_days * 24
             and (subject.maintainer_replied(team) or subject.accepting(accepted))

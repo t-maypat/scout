@@ -18,14 +18,13 @@ flowchart LR
     subgraph gh["GitHub"]
         api["GitHub API<br/>issues, pull requests, comments"]
         subgraph repo["Your scout repository"]
-            wl[("watchlist.toml")]
-            log[("events/YYYY-MM.jsonl")]
-            st[("state/")]
+            wl[("watchlist.toml<br/>on main")]
+            log[("events/YYYY-MM.jsonl<br/>on the data branch")]
+            st[("state/<br/>on the data branch")]
         end
         subgraph actions["GitHub Actions"]
-            pollwf["poll.yml<br/>every 15 minutes, in practice hourly at best"]
-            digestwf["digest.yml<br/>daily, enrich then send"]
-            nowwf["now.yml<br/>on demand, from the button"]
+            pollwf["poll.yml<br/>every 6 hours"]
+            digestwf["digest.yml<br/>poll, enrich, send<br/>daily and on demand"]
         end
     end
 
@@ -47,9 +46,8 @@ flowchart LR
     dash -- "reads" --> log
     dash -- "reads" --> wl
     chan -. "button tap" .-> worker
-    worker -- "Check now, workflow_dispatch" --> nowwf
-    nowwf -- "poll, enrich, send" --> chan
-    digestwf -- "enrich, GraphQL" --> api
+    worker -- "Check now, workflow_dispatch" --> digestwf
+    digestwf -- "poll and enrich" --> api
 ```
 
 Three things move, and each has one job:
@@ -57,9 +55,9 @@ Three things move, and each has one job:
 | | Job | Triggered by |
 |---|---|---|
 | **Probe** | Decide whether a repository is worth your time | You, on demand |
-| **Poll** | Record what changed on the repositories you watch | A cron, every 15 minutes |
+| **Poll** | Record what changed on the repositories you watch | A cron, every 6 hours |
 | **Enrich** | Ask what the listing cannot say about fresh issues | Before each digest |
-| **Digest** | Tell you about it once, when you can act | A cron, once a day |
+| **Digest** | Poll, enrich, then tell you once | A cron once a day, or the button |
 
 Everything else reads what those three wrote. The dashboard, `scout list`, `scout events`
 and `scout replay` never call GitHub on their own.
@@ -78,12 +76,19 @@ someone with admin rights on it. Scout watches other people's repositories, so i
 receive webhooks from them and has to go and look instead. That is the poll.
 
 **A cron is what makes the looking happen.** GitHub Actions has a `schedule:` trigger that
-runs a workflow on a cron expression. `poll.yml` runs `*/15 * * * *`; `digest.yml` runs
-`30 14 * * *`, which is 20:00 IST. Both can also be started by hand from the Actions tab.
+runs a workflow on a cron expression. `poll.yml` runs `0 */6 * * *`; `digest.yml` runs
+`30 10 * * *`. Both can also be started by hand from the Actions tab, and the digest
+is what the Discord button dispatches.
 
-**A cron is a floor, not a promise.** Measured here: polls 1 to 6 hours apart, and a 14:30
-digest committing at 18:2x, which lands the evening digest near midnight IST. `now.yml`
-exists for that reason and is what the Check now button dispatches.
+**A cron is a floor, not a promise, and it fails in two different ways.** Measured through
+the Actions API: a `*/15` schedule asked for ~1,050 runs and GitHub **created 76** - dense
+schedules are dropped, never queued. A once-daily schedule was **never dropped in 11
+days** but fired **2.9 to 5.2 hours late every time**, which is why the digest cron is
+10:30 UTC and not 14:30: four hours late from there is 20:00 IST.
+
+Every run of both kinds started **0 seconds** after being created, so none of this is
+queueing or the concurrency group. A `workflow_dispatch` has no scheduler in the path,
+so the button is the dependable trigger and the cron is the backstop.
 
 **Webhooks only appear at the Discord end**, and there are two kinds:
 
@@ -125,8 +130,12 @@ has a 90-second deadline and only one runs at a time.
 
 ## Poll
 
-**Runs:** `poll.yml` every 15 minutes in Actions, `scout poll` locally, or the dashboard's
-"Check for changes".
+**Runs:** `poll.yml` every 6 hours in Actions, inside every digest run, `scout poll`
+locally, or the dashboard's "Check for changes".
+
+The standalone schedule exists for one reason: transitions are derived by comparing
+consecutive snapshots, so `unassigned` and `ready_for_review` cannot be seen from a
+single look a day. Everything else the digest needs, the digest fetches itself.
 
 ```mermaid
 sequenceDiagram
@@ -134,7 +143,7 @@ sequenceDiagram
     participant Scout as scout poll
     participant GH as GitHub REST
     participant Repo as scout repository
-    Cron->>Scout: every 15 minutes, best effort
+    Cron->>Scout: every 6 hours, best effort
     Scout->>Repo: read watchlist and cursors
     loop each green or active repository
         Scout->>GH: newest-updated page, with its ETag
@@ -206,7 +215,10 @@ Nothing derived is stored. Delete it and `scout replay --check` rebuilds it iden
 
 ## Digest
 
-**Runs:** `digest.yml` daily at 14:30 UTC, or `scout digest --send`.
+**Runs:** `digest.yml` at 10:30 UTC, on a Check now tap, or `scout digest --send`.
+
+The workflow runs the whole chain - **poll, enrich, send** - so the digest never
+depends on whichever separate poll last survived the scheduler.
 
 ```mermaid
 sequenceDiagram
@@ -262,8 +274,9 @@ dashboard writes the same kind of event, so the two never disagree.
 - **Two threads per repository per day**, one per stream: fresh work in
   `17 Sep - owner/repo - fresh`, everything else in `17 Sep - owner/repo`. An issue that
   opened this morning and a pull request abandoned in July are read at different speeds.
-- **Each thread header carries a Check now button**, which queues `now.yml` through the
-  Worker: poll, enrich, send what is new. Nothing is written to GitHub by the tap.
+- **Each thread header carries a Check now button**, which dispatches `digest.yml` through
+  the Worker: poll, enrich, send what is new. A dispatch is created by the API call, so it
+  runs when a cron might not. Nothing is written to GitHub by the tap.
 - **Paced either way.** Discord limits bursts per channel and publishes no numbers for it,
   so requests go a second apart, a bucket Discord reports empty is waited out, and a 429 is
   retried after the wait it names. Every wait is capped at 5 seconds and the whole send at
@@ -309,9 +322,9 @@ sequenceDiagram
 | File | Holds | Written by | In git |
 |---|---|---|---|
 | `watchlist.toml` | Repositories, status, verdicts, maintainer sets | probe, add, refresh, mark, dashboard | yes |
-| `events/YYYY-MM.jsonl` | Observations, probe results, sent and hidden records | poll, digest, dashboard | yes |
-| `state/cursors.json` | ETags and watermarks per repository | poll | yes |
-| `state/discord_threads.json` | Thread and line ids per repository per day, last 7 days | digest, as the bot | yes |
+| `data/events/YYYY-MM.jsonl` | Observations, probe results, sent and hidden records | poll, digest, dashboard | yes, on `data` |
+| `data/state/cursors.json` | ETags and watermarks per repository | poll | yes, on `data` |
+| `data/state/discord_threads.json` | Thread and line ids per repository per day, last 7 days | digest, as the bot | yes, on `data` |
 | `.env` | Tokens and settings for local runs | you | no |
 | Repository secrets | Tokens for the Actions runs | you, in GitHub settings | no |
 
@@ -325,8 +338,8 @@ the working state that sits beside it.
 | | Locally | Deployed in GitHub Actions |
 |---|---|---|
 | Probe | Whenever you run it | Not scheduled |
-| Poll | Only when you run it | Every 15 minutes, best effort |
-| Digest | Only when you run it | Daily at 20:00 IST |
+| Poll | Only when you run it | Every 6 hours, best effort |
+| Digest | Only when you run it | Daily, and whenever you tap Check now |
 | Dashboard | `scout serve`, localhost only | Not deployed |
 | Tokens | `.env` | Repository secrets |
 
@@ -342,8 +355,8 @@ running either locally.
 
 | | Value | Setting |
 |---|---|---|
-| Poll schedule | every 15 minutes, in practice often hours apart | `poll.yml` |
-| Digest schedule | 14:30 UTC, 20:00 IST | `digest.yml` |
+| Poll schedule | every 6 hours, plus one inside each digest run | `poll.yml` |
+| Digest schedule | 10:30 UTC, landing near 20:00 IST once late | `digest.yml` |
 | Poll depth | 5 pages of 100 from the newest end, 1 page from the stalest | `SCOUT_POLL_PER_PAGE` |
 | Probe depth | 4 pages, or `--pages` | `SCOUT_PROBE_PAGES` |
 | Probe window | 180 days | `SCOUT_LOOKBACK_DAYS` |
@@ -355,6 +368,7 @@ running either locally.
 | Items per digest | 8 | `SCOUT_DIGEST_MAX_ITEMS` |
 | Fresh window | 7 days | `SCOUT_FRESH_MAX_AGE_DAYS` |
 | Issues enriched per run | 40, in batches of 10 | `SCOUT_FRESH_MAX_CANDIDATES` |
+| Re-ask about a candidate after | 12 hours | `SCOUT_FRESH_RECHECK_AFTER_HOURS` |
 | Discord pacing | 1 second between requests | `SEND_INTERVAL` in `notify.py` |
 | Discord waits | at most 5 seconds each, 3 retries on a 429 | `MAX_RATE_LIMIT_WAIT`, `RATE_LIMIT_RETRIES` |
 | Digest send deadline | 120 seconds | `SEND_DEADLINE` |
@@ -367,10 +381,9 @@ running either locally.
 ## Known gaps
 
 - **Later and Not for me record nothing yet**, as described under Buttons.
-- **Scheduled runs are late.** Measured over four days: poll commits land 1 to 6 hours
-  apart, median about 4, and the digest committed at 18:21 and 18:25 UTC against its
-  14:30 schedule - so the evening digest arrives nearer midnight IST than 20:00. The
-  Check now button exists because of this. The digest only
+- **Scheduled runs are dropped or late, depending on how often you ask.** GitHub created
+  76 runs of the ~1,050 a `*/15` cron asked for; a daily cron was never dropped but
+  fired 2.9-5.2 hours late. Hence a 10:30 UTC digest and the button. The digest only
   needs the log to be reasonably current by the evening, so this costs little, but do not
   expect 15-minute freshness.
 - **Fine-grained tokens expire.** When `SCOUT_GITHUB_TOKEN` does, every scheduled poll

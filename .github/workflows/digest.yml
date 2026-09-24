@@ -1,30 +1,53 @@
 name: digest
 
-# Interrupting, not observing. Once a day, when there is actually time to act on it.
-# 14:30 UTC is 20:00 IST.
+# One run does the whole chain: poll, enrich, send. Two schedules meant two lotteries, and
+# only one of them is winnable - measured on this repository, GitHub created 76 runs of the
+# roughly 1,050 a `*/15` cron asked for, while a once-daily cron was never dropped across
+# 11 days and fired 2.9 to 5.2 hours late. So the digest polls for itself rather than
+# trusting whichever poll happened to survive.
+#
+# 10:30 UTC rather than 14:30: with median lateness near four hours, that lands the digest
+# around 20:00 IST, which is the hour it exists for.
 on:
   schedule:
-    - cron: "30 14 * * *"
+    - cron: "30 10 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
         description: "Print the digest instead of sending it"
         type: boolean
         default: false
+      repo:
+        description: "Repository the button belonged to (recorded, not a filter)"
+        required: false
+        type: string
+      actor:
+        description: "Who asked"
+        required: false
+        type: string
 
 permissions:
   contents: write
 
+# Both workflows write the `data` branch, so they share one group and never race. A
+# manual run can therefore wait behind a scheduled poll - it is queued, never dropped.
 concurrency:
-  group: scout-digest
+  group: scout-log
+  cancel-in-progress: false
 
 jobs:
   digest:
     runs-on: ubuntu-latest
-    # A hung job must not sit there consuming minutes.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+
+      # The log lives on its own branch so main stays readable as code. Same layout as the
+      # local worktree, which is why SCOUT_EVENTS_DIR needs no override here.
+      - uses: actions/checkout@v4
+        with:
+          ref: data
+          path: data
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -32,9 +55,15 @@ jobs:
 
       - run: uv sync --frozen
 
+      - name: Who asked
+        run: echo "requested by ${{ inputs.actor || github.event_name }}"
+
+      - name: Poll the watchlist
+        env:
+          SCOUT_GITHUB_TOKEN: ${{ secrets.SCOUT_GITHUB_TOKEN }}
+        run: uv run scout poll
+
       - name: Enrich this week's unassigned issues
-        # What the listing cannot say: whether a pull request is already linked, and who
-        # has spoken up in the comments. Candidates only, so a handful of requests.
         # continue-on-error: a digest built on slightly older enrichment beats no digest.
         continue-on-error: true
         env:
@@ -56,18 +85,21 @@ jobs:
             uv run scout digest --send
           fi
 
-      - name: Record what was sent
-        # always(): a send that fails partway has still posted items and saved the thread
-        # ids. Skipping this on failure threw both away, so the next run opened a second
-        # thread and sent those items again. The job still reports the send as failed.
+      - name: Record what happened
+        # always(): a send that fails partway has still posted items and saved thread ids.
+        # Skipping this on failure threw both away, so the next run opened a second thread
+        # and sent those items again. The job still reports the send as failed.
         if: ${{ always() && inputs.dry_run != true }}
+        working-directory: data
         run: |
-          if [ -z "$(git status --porcelain events state)" ]; then exit 0; fi
+          if [ -z "$(git status --porcelain events state)" ]; then
+            echo "nothing new"
+            exit 0
+          fi
           git config user.name "scout"
           git config user.email "scout@users.noreply.github.com"
-          # state/ holds today's Discord thread ids. Without it a second run on the
-          # same day cannot find the thread and opens a duplicate.
           git add events state
-          git commit -m "digest sent: $(date -u +%Y-%m-%dT%H:%MZ)"
+          git commit -m "log: $(date -u +%Y-%m-%dT%H:%MZ)"
+          # Append-only with content-derived ids, so a rebase cannot conflict semantically.
           git pull --rebase --autostash
           git push

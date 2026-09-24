@@ -4,9 +4,9 @@ One REST call per repository per poll, usually. `/issues` returns pull requests 
 one stable URL covers both - which also means one ETag covers both, and an idle
 repository costs zero rate limit.
 
-Budget: ten repositories every fifteen minutes is forty requests an hour against a limit
-of five thousand, and most of those come back 304. The rate limit is not the constraint
-here and never will be. What matters is that polling often and *notifying* often are
+Budget: ten repositories four times a day is forty requests, against a limit of five
+thousand an hour, and most come back 304. The rate limit is not the constraint here and
+never will be. What matters is that polling often and *notifying* often are
 different decisions: this module only observes.
 """
 

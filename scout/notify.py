@@ -9,7 +9,7 @@ them however it is called. Buttons require the bot to post, which is why there a
 transports here: bot when a token and channel are configured, webhook otherwise.
 
 The rule this module exists to enforce: **polling often and interrupting often are
-different decisions.** The poller runs every fifteen minutes so the log is accurate. This
+different decisions.** The poller runs on its own schedule so the log is accurate. This
 runs once, in the evening, when there is actually time to act on what it says. Anything
 that pings a phone during office hours had better be worth walking out of a meeting for,
 which is why the hot path is deliberately narrow.
@@ -595,7 +595,7 @@ def send(
     webhook_url: str = "",
     bot_token: str = "",
     channel_id: str = "",
-    state_dir: str = "./state",
+    state_dir: str = "./data/state",
     tz: str = "UTC",
 ) -> int:
     """Deliver a digest. Returns how many messages went out.

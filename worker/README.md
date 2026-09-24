@@ -39,11 +39,17 @@ Thread headers carry one control button, whose id has no item number:
 
 `poll:<owner>/<repo>` — for example `poll:BerriAI/litellm`.
 
-It dispatches `now.yml`, which polls, enriches and sends whatever is new. It exists
-because scheduled runs are late: measured on this repository, polls land 1 to 6 hours
-apart and a 14:30 UTC digest committed at 18:2x. GitHub documents that schedules are
-delayed under load and that queued jobs may be dropped, so the schedule is a floor and
-this button is how you ask for an answer now.
+It dispatches `digest.yml`, which polls, enriches and sends whatever is new — the same
+workflow the daily schedule runs, so there is one code path rather than two.
+
+It exists because a cron here is unreliable in two different ways, both measured: a
+`*/15` schedule asked for ~1,050 runs and GitHub created **76**, and a once-daily
+schedule was never dropped but fired **2.9 to 5.2 hours late, every day**. A dispatch
+has no scheduler in the path — this API call creates the run — so the button is the
+reliable trigger and the cron is the backstop.
+
+Already-sent items are never repeated, so tapping it twice is harmless: you get what is
+new since the last digest, which is usually what you wanted anyway.
 
 The reply is ephemeral and immediate; the run takes a minute or two and posts into the
 same day threads. As with every other button, the Worker only queues a job — the job runs

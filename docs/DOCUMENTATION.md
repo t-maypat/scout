@@ -231,7 +231,7 @@ log: an ETag is a note about where this machine got to, not a fact about the wor
 
 Two separate decisions:
 
-- **Observing** every 15 minutes, so the log is accurate
+- **Observing** every 6 hours, so the log is accurate
 - **Interrupting** once at 20:00 IST, when there is time to act
 
 One repo per poll is usually one request that returns **304 and costs no rate limit at
@@ -318,13 +318,27 @@ GitHub is a link button and needs nothing at all.
 | Scheduled runs | GitHub Actions | Free on a public repo |
 | Public HTTPS receiver | Cloudflare Worker | Discord needs an answer in three seconds |
 
-`.github/workflows/poll.yml` runs every 15 minutes; `digest.yml` at 14:30 UTC;
-`now.yml` runs on demand, which is what the **Check now** button in Discord queues.
+`.github/workflows/poll.yml` runs every 6 hours; `digest.yml` at 10:30 UTC and whenever
+the **Check now** button in Discord dispatches it. The digest polls and enriches before
+sending, so it never depends on a separate poll having survived the scheduler.
 
-Measured on this repository over four days: poll runs land **1 to 6 hours apart**,
-median about 4, and the digest committed at 18:21 and 18:25 UTC against a 14:30
-schedule. GitHub documents this - scheduled runs are delayed under load and queued
-jobs may be dropped. Treat the schedule as a floor, and use the button when it matters.
+**The log lives on the `data` branch**, not on main, so the history you read is code.
+Add it once after cloning:
+
+```bash
+git worktree add data data
+```
+
+`scout doctor` tells you this if the directory is missing. Actions does the same thing
+with a second `actions/checkout`.
+
+Measured through the Actions API: a `*/15` cron asked for ~1,050 runs and GitHub
+**created 76** of them, while a once-daily cron was **never dropped across 11 days**
+but fired **2.9 to 5.2 hours late every day**. Dense schedules are dropped; sparse ones
+run late. Every run started 0 seconds after being created, so none of it is queueing.
+
+A `workflow_dispatch` has no scheduler in the path, which is why the button is reliable
+and the cron is the backstop.
 
 Repository secrets: `SCOUT_GITHUB_TOKEN`, plus either `SCOUT_DISCORD_WEBHOOK_URL` for plain
 notifications or `SCOUT_DISCORD_BOT_TOKEN` and `SCOUT_DISCORD_CHANNEL_ID` for threads and
@@ -333,8 +347,8 @@ Actions → General → Workflow permissions must be **Read and write**, or the 
 cannot commit the log.
 
 **Use a public repository.** Public repos get unlimited Actions minutes; a private one
-gets 2,000 a month, and a 15-minute cadence costs roughly 2,880. If you must keep it
-private, change the cron to `*/30` and set a spending limit of zero.
+gets 2,000 a month. The current schedule - four polls and one digest a day - costs
+well under 200 minutes a month, so this is no longer close to the line either way.
 
 Actions' scheduled workflows run late fairly often, which costs nothing here because the
 digest is batched to the evening anyway. Note that GitHub disables schedules after 60
@@ -372,6 +386,7 @@ All environment variables, prefixed `SCOUT_`. Set them in `.env`.
 | `FRESH_MAX_AGE_DAYS` | `7` | How young an issue must be to count as fresh |
 | `FRESH_MAX_CANDIDATES` | `40` | Issues enriched per run |
 | `FRESH_BATCH_SIZE` | `10` | Issues per GraphQL request |
+| `FRESH_RECHECK_AFTER_HOURS` | `12` | Re-ask even if the issue has not moved |
 | `FRESH_ACCEPTING_LABELS` | see below | Labels that mean a maintainer wants the work |
 | **Digest** | | |
 | `DIGEST_MAX_ITEMS` | `8` | |
@@ -386,8 +401,8 @@ All environment variables, prefixed `SCOUT_`. Set them in `.env`.
 | `RATE_LIMIT_FLOOR` | `500` | Stops this far short of the limit |
 | **Paths** | | |
 | `WATCHLIST_PATH` | `./watchlist.toml` | |
-| `EVENTS_DIR` | `./events` | |
-| `STATE_DIR` | `./state` | |
+| `EVENTS_DIR` | `./data/events` | On the `data` branch, via a worktree |
+| `STATE_DIR` | `./data/state` | Same |
 
 ---
 

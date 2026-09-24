@@ -63,8 +63,10 @@ def enrichment(
     number: int = 7,
     *,
     linked: tuple[dict, ...] = (),
+    commits: tuple[dict, ...] = (),
     comments: tuple[dict, ...] = (),
     updated: float = 1,
+    observed_at: datetime | None = None,
 ) -> Event:
     """What `scout enrich` writes, for one version of one issue."""
     return Event.make(
@@ -72,8 +74,13 @@ def enrichment(
         repo=REPO,
         subject=number,
         occurred_at=iso(updated),
-        payload={"number": number, "linked_prs": list(linked), "comments": list(comments)},
-        observed_at=NOW,
+        payload={
+            "number": number,
+            "linked_prs": list(linked),
+            "commit_refs": list(commits),
+            "comments": list(comments),
+        },
+        observed_at=observed_at or NOW,
     )
 
 
@@ -185,6 +192,24 @@ class TestWhatCountsAsFreshAndFree:
             observed(issue_row(labels=("confirmed",), assignees=("someone",))), enrichment()
         )
         assert found == []
+
+    def test_a_commit_in_somebody_elses_fork_means_they_started(self):
+        """Earlier evidence than a pull request, which is the point: the branch exists
+        before the PR does, and that is when the collision is still avoidable."""
+        found = fresh_items(
+            observed(issue_row(labels=("confirmed",))),
+            enrichment(commits=({"oid": "abc123", "repo": "stranger/widget"},)),
+        )
+        assert found == []
+
+    def test_a_commit_in_the_upstream_repo_does_not(self):
+        """Usually a maintainer touching it in passing. Counting it would hide issues that
+        are genuinely free."""
+        found = fresh_items(
+            observed(issue_row(labels=("confirmed",))),
+            enrichment(commits=({"oid": "abc123", "repo": REPO},)),
+        )
+        assert [o.number for o in found] == [7]
 
     def test_the_newest_enrichment_wins(self):
         """A claim that arrived in a later fetch has to beat the earlier clean answer."""
@@ -334,6 +359,41 @@ class TestEnrichmentAsksAboutCandidatesOnly:
             observed(issue_row(3, created=3, updated=3)),
         )
         assert [s.number for s in enrich.candidates(state, now=NOW, limit=2)] == [2, 3]
+
+    def test_an_old_answer_is_asked_again_even_when_the_issue_has_not_moved(self):
+        """The hole this closes: a commit pushed to a fork does not touch the issue, so
+        version equality is not proof that what we know about it is current."""
+        state = self.state_with(observed(issue_row()), enrichment())
+        assert enrich.candidates(state, now=NOW) == [], "just answered, no need"
+        later = NOW + timedelta(hours=13)
+        assert [s.number for s in enrich.candidates(state, now=later)] == [7]
+
+    def test_the_query_asks_about_commit_references(self):
+        """Filtering for CROSS_REFERENCED_EVENT and CONNECTED_EVENT alone made the check
+        vacuous on litellm, which produces neither."""
+        document = enrich.document([7])
+        for wanted in ("REFERENCED_EVENT", "CROSS_REFERENCED_EVENT", "CONNECTED_EVENT"):
+            assert wanted in document
+
+    def test_commit_references_carry_the_repository_they_live_in(self):
+        node = {
+            "number": 7,
+            "timelineItems": {
+                "nodes": [
+                    {
+                        "__typename": "ReferencedEvent",
+                        "commit": {"oid": "deadbeef"},
+                        "commitRepository": {"nameWithOwner": "stranger/widget"},
+                    },
+                    {"__typename": "ReferencedEvent", "commit": {}, "commitRepository": {}},
+                ]
+            },
+            "comments": {"nodes": []},
+        }
+        event = enrich.to_event(REPO, node, None, NOW)
+        assert event.payload["commit_refs"] == [
+            {"oid": "deadbeef", "repo": "stranger/widget"}
+        ]
 
     def test_one_query_covers_a_batch_of_issues(self):
         document = enrich.document([7, 9])

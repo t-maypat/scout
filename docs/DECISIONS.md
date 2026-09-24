@@ -210,7 +210,7 @@ act. Learning at 10:00 rather than 10:05 changes nothing if you are at work unti
 
 So the two are separate knobs:
 
-- **Poll every 15 minutes**, so the event log is accurate
+- **Poll every 6 hours**, so the event log is accurate
 - **Send one digest in the evening**, when there is time to act on it
 
 Immediate interruption is reserved for a narrow class that earns it.
@@ -387,13 +387,48 @@ exists precisely to avoid a race that cannot be seen from the listing.
 ## The schedule is a floor, so there is a button
 
 Scheduled workflows are delayed under load and may be dropped, which GitHub documents
-and this repository measures: polls 1 to 6 hours apart, and a 14:30 digest committing
-at 18:2x. For a log that costs nothing. For "I have twenty minutes free now" it is
-useless.
+and this repository measures. For a log that costs nothing. For "I have twenty minutes
+free now" it is useless.
+
+Measured through the Actions API rather than guessed at:
+
+| | |
+|---|---|
+| Runs created for a `*/15` cron | 76, against ~1,050 asked for |
+| Runs created for a once-daily cron | 11 in 11 days, none dropped, each 2.9-5.2h late |
+| Queue wait on every run of both kinds | 0 seconds |
+
+Two distinct failures: a dense cron is **dropped**, a sparse one is **created late**. The
+zero queue wait rules out both queueing and the concurrency group.
 
 So each thread header carries **Check now**, which the Worker turns into a
-`workflow_dispatch` of `now.yml`: poll, enrich, send what is new. The Worker still
-cannot write to GitHub - it queues a job, and the job is the same read-only path.
+`workflow_dispatch` of `digest.yml` - the same workflow the schedule runs, so there is one
+code path rather than two. A dispatch is created by the API call itself, with no scheduler
+in the path, which is why the button is the reliable trigger and the cron is the backstop.
+The Worker still cannot write to GitHub: it queues a job, and the job is read-only.
+
+And because the digest never repeats an item it has already sent, tapping the button is
+idempotent - you get what is new since last time.
+
+---
+
+## The log is not history you read
+
+Git is the database, and that part was right. Committing the log into the branch you read
+code in was not: **69 of main's 108 commits said nothing but `poll:`**.
+
+The log now lives on an orphan `data` branch - a worktree locally, a second checkout in
+Actions - and main was rewritten to strip `events/` and `state/`, which made those commits
+empty and dropped them. 108 commits became 28. The pre-rewrite history is kept on the
+remote as the tag `backup-pre-rewrite`.
+
+Nothing in the code changed, because `SCOUT_EVENTS_DIR` and `SCOUT_STATE_DIR` already
+existed. Only their defaults moved, and `doctor` now says how to add the worktree when the
+directory is missing.
+
+**Why an orphan branch rather than squashing periodically:** squashing pushed history that
+concurrent runs are also pushing to is how a day of log gets lost. A separate branch needs
+no rewriting, ever.
 
 ---
 

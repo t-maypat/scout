@@ -1,33 +1,37 @@
 name: poll
 
-# Observing, not interrupting. This runs often so the event log is accurate; the digest
-# workflow decides when any of it is worth a notification.
+# Observing, not interrupting. The digest polls for itself, so this exists for one reason:
+# transitions are derived by comparing consecutive snapshots, and "just came free" cannot
+# be seen from a single look a day.
 #
-# GitHub's scheduled workflows are best-effort and routinely run late. That is fine here:
-# nothing downstream cares whether an observation was recorded at :00 or :23. It also
-# disables schedules after 60 days of repository inactivity - the log commit below is
-# what keeps this one alive.
+# Six-hourly rather than every 15 minutes. A `*/15` cron asked for ~1,050 runs here and
+# GitHub created 76 of them - dense schedules are dropped, not queued - and each surviving
+# run wrote a commit, which is how 69 of main's 108 commits came to say nothing but "poll:".
+# Four predictable looks a day is worth more than eight unpredictable ones.
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
 
-# Two overlapping runs would both try to commit the log. The poller itself is idempotent,
-# but the push is not, so serialise.
+# Shared with the digest: both write the `data` branch, so they queue rather than race.
 concurrency:
-  group: scout-poll
+  group: scout-log
   cancel-in-progress: false
 
 jobs:
   poll:
     runs-on: ubuntu-latest
-    # A hung job must not sit there consuming minutes.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          ref: data
+          path: data
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -41,6 +45,7 @@ jobs:
         run: uv run scout poll
 
       - name: Commit new observations
+        working-directory: data
         run: |
           if [ -z "$(git status --porcelain events state)" ]; then
             echo "nothing new"
@@ -49,9 +54,6 @@ jobs:
           git config user.name "scout"
           git config user.email "scout@users.noreply.github.com"
           git add events state
-          git commit -m "poll: $(date -u +%Y-%m-%dT%H:%MZ)"
-          # Another run may have pushed while this one was working. The log is
-          # append-only and events carry deterministic ids, so a rebase cannot conflict
-          # semantically - worst case a duplicate line, which derivation drops.
+          git commit -m "log: $(date -u +%Y-%m-%dT%H:%MZ)"
           git pull --rebase --autostash
           git push
